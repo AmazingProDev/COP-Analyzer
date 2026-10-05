@@ -85047,6 +85047,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
   const _BDD_IDB_NAME = "optim_analyzer";
   const _BDD_IDB_STORE = "datasets";
   const _BDD_IDB_KEY = "active_bdd_v2";
+  const _BDD_BUNDLE_VERSION_KEY = "cop_bdd_bundle_version";
+  const _BDD_BUNDLE_MANIFEST = "BDD/manifest.json";
 
   function _toPersistedBddSectors(sectors) {
     return (sectors || []).map((s) => ({
@@ -85325,10 +85327,14 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         localStorage.removeItem(_BDD_CACHE_KEY);
       } catch (_) {}
     }
-    _saveBddSectorsIndexedDb(mergedSectors).catch((error) => {
+    _saveBddSectorsIndexedDb(mergedSectors).then(() => {
+      if (options.bundleVersion) {
+        try { localStorage.setItem(_BDD_BUNDLE_VERSION_KEY, options.bundleVersion); } catch (_) {}
+      }
+    }).catch((error) => {
       console.warn("[BDD] Browser persistence unavailable:", error);
     });
-    fetch("/api/bdd/sectors-cache", {
+    if (!window.COP_LITE) fetch("/api/bdd/sectors-cache", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -85347,6 +85353,28 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
   }
 
   async function _loadBddOnStartup() {
+    let bundle = null;
+    try {
+      const response = await fetch(_BDD_BUNDLE_MANIFEST, { cache: "no-store" });
+      if (response.ok) bundle = await response.json();
+    } catch (error) {
+      console.warn("[BDD] Bundled inventory manifest unavailable:", error);
+    }
+    _loadSarfOnStartup(bundle);
+    let activeBundleVersion = null;
+    try { activeBundleVersion = localStorage.getItem(_BDD_BUNDLE_VERSION_KEY); } catch (_) {}
+    if (bundle && bundle.bdd && bundle.version !== activeBundleVersion) {
+      try {
+        const response = await fetch(bundle.bdd, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        _parseBddFile(new File([await response.blob()], "BDD_Mensuel_M08.xlsx"), {
+          bundleVersion: bundle.version,
+        });
+        return;
+      } catch (error) {
+        console.error("[BDD] Bundled inventory unavailable:", error);
+      }
+    }
     // 1. IndexedDB — durable in-browser storage for both small and large BDDs.
     try {
       const indexedDbCached = await _loadBddSectorsIndexedDb();
@@ -85377,6 +85405,29 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       .catch(() => {});
   }
 
+  async function _loadSarfOnStartup(bundle) {
+    if (!bundle || !bundle.sarf || !window.mapRenderer) return;
+    try {
+      const response = await fetch(bundle.sarf);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const workbook = XLSX.read(await response.arrayBuffer(), { type: "array" });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const sectors = XLSX.utils.sheet_to_json(sheet, { defval: "" }).map((row) => ({
+        lat: Number(row.Y), lng: Number(row.X), azimuth: Number(row.Azimuth) || 0,
+        name: String(row["Site name"] || ""), siteName: String(row["Site name"] || ""),
+        cellName: String(row["Cell name"] || ""), cellId: String(row["Cell name"] || ""),
+        pci: Number(row.PCI), sc: Number(row.PCI), freq: Number(row["DL EARFCN"]),
+        rnc: Number(row.eNodeBID), tech: "4G", color: "#f97316", source: "SARF",
+      })).filter((sector) => Number.isFinite(sector.lat) && Number.isFinite(sector.lng));
+      if (!sectors.length) throw new Error("Aucun secteur SARF valide");
+      const id = "sarf_autoroute_rabat_casa";
+      window.mapRenderer.addSiteLayer(id, "SARF Autoroute Rabat - Casa", sectors, false);
+      addSiteLayerToSidebar(id, "SARF Autoroute Rabat - Casa", sectors.length);
+    } catch (error) {
+      console.error("[SARF] Bundled inventory unavailable:", error);
+    }
+  }
+
   // COP LITE: BDD (200k+ sectors) loads only after login so the landing
   // gate stays interactive; the event is dispatched by revealApp().
   if (window.COP_LITE) {
@@ -85395,7 +85446,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     });
   }
 
-  function _parseBddFile(file) {
+  function _parseBddFile(file, options = {}) {
     const statusEl = document.getElementById("bddStatusText");
     if (statusEl) statusEl.textContent = "BDD: loading...";
     const reader = new FileReader();
@@ -85445,7 +85496,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const azimuth = parseFloat(gv(row, ["azimut", "azimuth"])) || 0;
             let name, cellName, lac, tac, freq, pci, rnc, cid;
             if (sn === "2G") {
-              name = gv(row, ["site name", "sitename"]);
+              name = gv(row, ["btsname", "site name", "sitename"]);
               cellName = gv(row, ["cellname"]);
               lac = gv(row, ["lac"]);
               freq = parseInt(gv(row, ["bcch"]));
@@ -85455,7 +85506,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
               rnc = gv(row, ["bsc"]);
               cid = parseInt(gv(row, ["cellid"]));
             } else if (sn === "3G") {
-              name = gv(row, ["site name", "sitename"]);
+              name = gv(row, ["nodebname", "site name", "sitename"]);
               cellName = gv(row, ["cellname"]);
               lac = gv(row, ["lac"]);
               freq = parseInt(gv(row, ["downlink uarfcn", "uarfcn"]));
@@ -85479,7 +85530,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
               cid = parseInt(gv(row, ["cell id", "cellid"]));
             } else {
               name = gv(row, ["site name", "sitename", "gnb name"]);
-              cellName = gv(row, ["cellname", "nrducellname", "ducellname"]);
+              cellName = gv(row, ["cellname", "nrducellname", "nr du cell name", "ducellname"]);
               tac = gv(row, ["tac"]);
               freq = parseInt(gv(row, ["downlink narfcn", "narfcn", "arfcn"]));
               pci = parseInt(gv(row, ["pci", "physical cell id", "phy cell id", "phycellid"]));
@@ -85506,7 +85557,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
           }
         }
         if (allSectors.length > 0) {
-          _applyBddSectors(allSectors);
+          _applyBddSectors(allSectors, options);
         } else {
           if (statusEl) statusEl.textContent = "BDD: no valid sectors found";
         }

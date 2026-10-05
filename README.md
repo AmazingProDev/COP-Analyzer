@@ -19,6 +19,18 @@ python3 -m http.server 8000
 
 No `server.py`, no LOS backend, no Python deps. Any static host works.
 
+## BDD et SARF intégrés
+
+Les fichiers `BDD/BDD_Mensuel_M08.xlsx` (2G/3G/4G/5G) et
+`BDD/SARF autoroute Rabat - Casa.xlsx` sont chargés depuis l'hébergement web
+après connexion. La BDD est ensuite conservée dans IndexedDB pour accélérer les
+ouvertures suivantes. SARF apparaît comme une couche de sites distincte.
+
+Après avoir remplacé le classeur BDD, exécuter `python3 BDD/update_manifest.py`
+avant de publier le site : la nouvelle version renouvelle le cache BDD dans les
+navigateurs. Le bouton « Update BDD » permet toujours une mise à jour locale ;
+une mise à jour commune à tous les visiteurs passe par les fichiers du dépôt.
+
 ## Access gate
 
 `index.html` opens on a login screen (inline gate script + background `landing-bg.jpg`). Scripts load with `defer` so the gate paints instantly; the 200k-sector BDD loads only after login.
