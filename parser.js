@@ -1,0 +1,6954 @@
+const CallSessionBuilder = {
+    build(records, options = {}) {
+        const timeWindowMs = Number.isFinite(options.timeWindowMs) ? options.timeWindowMs : 30000;
+        const rrcNasFollowMs = Number.isFinite(options.rrcNasFollowMs) ? options.rrcNasFollowMs : 5000;
+        const minValidAttemptMs = Number.isFinite(options.minValidAttemptMs) ? options.minValidAttemptMs : 2000;
+        const maxSetupWindowMs = Number.isFinite(options.maxSetupWindowMs) ? options.maxSetupWindowMs : 30000;
+
+        const parseTimeToMs = (timeValue) => {
+            if (!timeValue) return NaN;
+            const txt = String(timeValue).trim();
+            const isoMs = Date.parse(txt);
+            if (!Number.isNaN(isoMs)) return isoMs;
+
+            const m = txt.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+            if (!m) return NaN;
+            const hh = parseInt(m[1], 10);
+            const mm = parseInt(m[2], 10);
+            const ss = parseInt(m[3], 10);
+            const ms = parseInt((m[4] || '0').padEnd(3, '0'), 10);
+            return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
+        };
+
+        const normalizeIdValue = (value) => {
+            if (value === undefined || value === null) return null;
+            const txt = String(value).trim();
+            if (!txt || txt.toUpperCase() === 'N/A' || txt.toUpperCase() === 'UNKNOWN') return null;
+            return txt;
+        };
+
+        const readKeyByPattern = (obj, patterns) => {
+            if (!obj || typeof obj !== 'object') return null;
+            for (const [k, v] of Object.entries(obj)) {
+                const key = String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                if (patterns.some(p => p.test(key))) {
+                    const normalized = normalizeIdValue(v);
+                    if (normalized) return normalized;
+                }
+            }
+            return null;
+        };
+
+        const extractFromText = (text, pattern) => {
+            if (!text) return null;
+            const m = String(text).match(pattern);
+            return m ? normalizeIdValue(m[1]) : null;
+        };
+
+        const extractIdentifiers = (record) => {
+            const props = record && record.properties ? record.properties : {};
+            const txtPool = [record?.details, record?.message, props?.Message].filter(Boolean).join(' | ');
+
+            const callId = normalizeIdValue(
+                readKeyByPattern(record, [/^callid$/, /^callidentifier$/, /^transactionid$/, /^transid$/, /^tid$/]) ||
+                readKeyByPattern(props, [/^callid$/, /^callidentifier$/, /^transactionid$/, /^transid$/, /^tid$/]) ||
+                extractFromText(txtPool, /\b(?:call\s*id|transaction\s*id|trans(?:action)?\s*id|tid)\s*[:=]\s*([A-Za-z0-9_-]+)/i)
+            );
+
+            const imsi = normalizeIdValue(
+                readKeyByPattern(record, [/^imsi$/]) ||
+                readKeyByPattern(props, [/^imsi$/]) ||
+                extractFromText(txtPool, /\bimsi\s*[:=]\s*([0-9]{5,20})\b/i)
+            );
+
+            const tmsi = normalizeIdValue(
+                readKeyByPattern(record, [/^tmsi$/]) ||
+                readKeyByPattern(props, [/^tmsi$/]) ||
+                extractFromText(txtPool, /\btmsi\s*[:=]\s*([A-Fa-f0-9]{4,16})\b/i)
+            );
+
+            return { callId, imsi, tmsi };
+        };
+
+        const isRrcState = (value) => {
+            if (!value) return false;
+            const txt = String(value).toUpperCase();
+            return ['IDLE', 'CELL_DCH', 'CELL_FACH', 'CELL_PCH', 'URA_PCH', 'CONNECTED', 'INACTIVE'].includes(txt);
+        };
+
+        const parseRrcFromRecord = (record) => {
+            const props = record?.properties || {};
+            const explicitState = normalizeIdValue(record?.['RRC State'] || props['RRC State'] || record?.rrcState);
+            if (isRrcState(explicitState)) return explicitState;
+
+            const msg = String(record?.message || props?.Message || '').toUpperCase();
+            if (msg.includes('RRC_CONNECTION_RELEASE') || msg.includes('RRC RELEASE')) return 'IDLE';
+            if (msg.includes('CELL_UPDATE')) return 'CELL_FACH';
+            if (msg.includes('PAGING')) return 'CELL_PCH';
+            if (msg.includes('RRC_CONNECTION_SETUP') || msg.includes('RADIO_BEARER_SETUP')) return 'CONNECTED';
+            return null;
+        };
+
+        const parseRabEvent = (record) => {
+            const source = String(record?.event || record?.message || record?.properties?.Message || '').toUpperCase();
+            if (!source.includes('RAB')) return null;
+            let phase = 'UPDATE';
+            if (source.includes('SETUP') || source.includes('ASSIGN') || source.includes('ESTABLISH') || source.includes('ADD')) phase = 'START';
+            if (source.includes('RELEASE') || source.includes('REMOVE') || source.includes('DELETE')) phase = 'END';
+            return {
+                time: record.time || null,
+                phase,
+                event: record.event || record.message || 'RAB Event',
+                detail: record.message || record.details || null
+            };
+        };
+
+        const parseMeasurement = (record) => {
+            if (record?.type !== 'MEASUREMENT') return null;
+            const props = record.properties || {};
+            const pick = (...vals) => {
+                for (const v of vals) {
+                    if (v === undefined || v === null || v === '' || Number.isNaN(v)) continue;
+                    return v;
+                }
+                return null;
+            };
+            const m = {
+                time: record.time || null,
+                rscp: pick(record.level, props['Serving RSCP'], props['RSCP']),
+                rsrp: pick(props['Serving RSRP'], props['RSRP']),
+                ecno: pick(record.ecno, props['EcNo'], props['Serving EcNo']),
+                rsrq: pick(props['RSRQ']),
+                rssi: pick(record.rssi, props['RSSI']),
+                blerDl: pick(record.bler_dl, props['BLER DL']),
+                blerUl: pick(record.bler_ul, props['BLER UL']),
+                freq: pick(record.freq, props['Freq'])
+            };
+            const hasSignal = Object.values(m).some(v => v !== null && v !== m.time);
+            return hasSignal ? m : null;
+        };
+
+        const getCorrelationKey = (ids) => {
+            if (ids.callId) return `CALL:${ids.callId}`;
+            if (ids.imsi && ids.tmsi) return `IMSI:${ids.imsi}|TMSI:${ids.tmsi}`;
+            if (ids.imsi) return `IMSI:${ids.imsi}`;
+            if (ids.tmsi) return `TMSI:${ids.tmsi}`;
+            return '__ANON__';
+        };
+
+        const isIdleState = (rrc) => ['IDLE', 'CELL_PCH', 'URA_PCH'].includes(String(rrc || '').toUpperCase());
+
+        const getMessageEnvelope = (record) => {
+            const parts = [
+                record?.event,
+                record?.message,
+                record?.details,
+                record?.properties?.Message,
+                record?.properties?.Event
+            ].filter(Boolean).map(v => String(v).toUpperCase());
+            return parts.join(' | ');
+        };
+
+        const parseSemanticFlags = (record) => {
+            const msg = getMessageEnvelope(record);
+            const props = record?.properties || {};
+            const rrcCause = String(record?.rrc_rel_cause || props['RRC Release Cause'] || props['rrc_rel_cause'] || '').toUpperCase();
+            const csCause = String(record?.cs_rel_cause || props['CS Release Cause'] || props['cs_rel_cause'] || '').toUpperCase();
+            const causeEnvelope = `${rrcCause} ${csCause}`;
+
+            const has = (s) => msg.includes(s);
+            const hasWord = (s) => new RegExp(`\\b${s}\\b`, 'i').test(msg);
+
+            const isCmServiceRequest = has('CM_SERVICE_REQUEST') || has('CM SERVICE REQUEST');
+            const isSetupMoMt = (hasWord('SETUP') && !has('SETUP_COMPLETE') && !has('RRC_CONNECTION_SETUP') && !has('RRC SETUP'));
+            const isRrcConnectionRequest = has('RRC_CONNECTION_REQUEST') || has('RRC CONNECTION REQUEST');
+            const isRabAssignmentRequest = has('RAB_ASSIGNMENT_REQUEST') || has('RAB ASSIGNMENT REQUEST') || has('RAB_ASSIGNMENT_REQ');
+            const isCallProceeding = has('CALL_PROCEEDING') || has('CALL PROCEEDING');
+
+            const isNasCallControl = (
+                isCmServiceRequest ||
+                isSetupMoMt ||
+                isCallProceeding ||
+                has('CC ') ||
+                has('CALL CONTROL')
+            );
+
+            const isRrcSetupComplete = has('RRC_CONNECTION_SETUP_COMPLETE') || has('RRC CONNECTION SETUP COMPLETE');
+            const isRabAssignComplete = has('RAB_ASSIGNMENT_COMPLETE') || has('RAB ASSIGNMENT COMPLETE') || has('RAB ASSIGN COMPLETE');
+            const isRrcConnectionReject = has('RRC_CONNECTION_REJECT') || has('RRC CONNECTION REJECT');
+            const isRabAssignmentFailure = has('RAB_ASSIGNMENT_FAILURE') || has('RAB ASSIGNMENT FAILURE') || has('RAB ASSIGN FAIL');
+            const isConnect = hasWord('CONNECT') && !has('RRC_CONNECTION') && !has('SETUP_COMPLETE');
+            const isDisconnect = hasWord('DISCONNECT');
+            const isRelease = hasWord('RELEASE');
+            const isRrcRelease = has('RRC_CONNECTION_RELEASE') || has('RRC CONNECTION RELEASE');
+
+            const isRlf = has('RADIO LINK FAILURE') || has('RLF');
+            const isIuRelease = has('IU RELEASE') || has('IU-CS RELEASE') || has('IUCS RELEASE');
+            const isCmServiceReject = has('CM_SERVICE_REJECT') || has('CM SERVICE REJECT');
+            const isCallReject = has('CALL_REJECT') || has('CALL REJECT');
+            const isRabRelease = has('RAB RELEASE');
+            const isHoFailure = has('HANDOVER FAILURE') || has('HO FAILURE') || has('HO_FAIL') || has('HOF') || has('INTER-RAT HO FAILURE') || has('IRAT HO FAILURE');
+
+            const isNormalCause = causeEnvelope.includes('NORMAL');
+            const isAbnormalCause = (
+                causeEnvelope.includes('ABNORMAL') ||
+                causeEnvelope.includes('FAIL') ||
+                causeEnvelope.includes('ERROR') ||
+                causeEnvelope.includes('RLF')
+            );
+
+            return {
+                isCmServiceRequest,
+                isSetupMoMt,
+                isRrcConnectionRequest,
+                isRabAssignmentRequest,
+                isCallProceeding,
+                isNasCallControl,
+                isRrcSetupComplete,
+                isRabAssignComplete,
+                isRrcConnectionReject,
+                isRabAssignmentFailure,
+                isConnect,
+                isDisconnect,
+                isRelease,
+                isRrcRelease,
+                isRlf,
+                isIuRelease,
+                isCmServiceReject,
+                isCallReject,
+                isRabRelease,
+                isHoFailure,
+                isRrcReleaseNormal: isRrcRelease && isNormalCause,
+                isRrcReleaseAbnormal: isRrcRelease && isAbnormalCause,
+                isIuReleaseAbnormal: isIuRelease && isAbnormalCause
+            };
+        };
+
+        const sortedRecords = (Array.isArray(records) ? records : [])
+            .filter(r => r && r.time)
+            .slice()
+            .sort((a, b) => {
+                const ta = parseTimeToMs(a.time);
+                const tb = parseTimeToMs(b.time);
+                if (Number.isNaN(ta) && Number.isNaN(tb)) return String(a.time).localeCompare(String(b.time));
+                if (Number.isNaN(ta)) return 1;
+                if (Number.isNaN(tb)) return -1;
+                return ta - tb;
+            });
+
+        const sessions = [];
+        let seq = 1;
+        const stateByKey = new Map();
+
+        const ensureKeyState = (key) => {
+            if (!stateByKey.has(key)) {
+                stateByKey.set(key, {
+                    ueRrcState: 'IDLE',
+                    activeSession: null,
+                    pendingRrcRequestMs: null,
+                    pendingRrcRequestTime: null
+                });
+            }
+            return stateByKey.get(key);
+        };
+
+        const appendToSession = (session, rec, ids) => {
+            if (!session.callTransactionId && ids.callId) session.callTransactionId = ids.callId;
+            if (!session.imsi && ids.imsi) session.imsi = ids.imsi;
+            if (!session.tmsi && ids.tmsi) session.tmsi = ids.tmsi;
+
+            session.recordsCount += 1;
+            const recMs = parseTimeToMs(rec.time);
+            if (Number.isNaN(parseTimeToMs(session.startTime)) || (!Number.isNaN(recMs) && recMs < parseTimeToMs(session.startTime))) session.startTime = rec.time;
+            if (Number.isNaN(parseTimeToMs(session.endTime)) || (!Number.isNaN(recMs) && recMs > parseTimeToMs(session.endTime))) session.endTime = rec.time;
+
+            const rrcState = parseRrcFromRecord(rec);
+            if (rrcState) {
+                const last = session.rrcStates[session.rrcStates.length - 1];
+                if (!last || last.state !== rrcState) {
+                    session.rrcStates.push({ time: rec.time, state: rrcState });
+                }
+            }
+
+            const rabEvent = parseRabEvent(rec);
+            if (rabEvent) session.rabLifecycle.push(rabEvent);
+
+            const measurement = parseMeasurement(rec);
+            if (measurement) session.radioMeasurementsTimeline.push(measurement);
+        };
+
+        const createSession = (startTime, ids, startTrigger) => {
+            const s = {
+                sessionId: `call-session-${seq++}`,
+                _source: 'generic',
+                kind: 'RRC_SESSION',
+                callTransactionId: ids.callId,
+                imsi: ids.imsi,
+                tmsi: ids.tmsi,
+                resultType: 'RRC_SESSION',
+                timeWindowMs,
+                startTime,
+                endTime: startTime,
+                rrcStates: [],
+                rabLifecycle: [],
+                radioMeasurementsTimeline: [],
+                recordsCount: 0,
+                state: 'CALL_ATTEMPT',
+                startTrigger,
+                endTrigger: null,
+                endType: null,
+                drop: false,
+                setupFailure: false,
+                callFailed: false,
+                hasConnect: false,
+                callSetupSuccess: false,
+                attemptStarted: true,
+                ignored: false,
+                incomplete: false,
+                sawRrcSetupComplete: false,
+                sawRrcConnectionReject: false,
+                sawCmServiceReject: false,
+                sawCallReject: false,
+                sawRabAssignmentFailure: false,
+                sawRabReleaseBeforeConnect: false,
+                sawRlfBeforeConnect: false,
+                failureReason: null,
+                hasCsRab: false,
+                disconnectSeen: false,
+                normalClearingSeen: false
+            };
+            sessions.push(s);
+            return s;
+        };
+
+        const classifyFailureReason = (session) => {
+            if (!session || !session.setupFailure || session.hasConnect) return null;
+
+            if (session.sawRrcConnectionReject && !session.sawRrcSetupComplete) {
+                return {
+                    code: 'RRC_FAILURE',
+                    label: 'RRC Failure',
+                    cause: 'overage / access congestion'
+                };
+            }
+            if (session.sawCmServiceReject && session.sawCallReject) {
+                return {
+                    code: 'CORE_NAS_REJECT',
+                    label: 'Core / NAS Reject',
+                    cause: 'authentication, MSC congestion, no circuit'
+                };
+            }
+            if (session.sawRabAssignmentFailure && session.sawRabReleaseBeforeConnect) {
+                return {
+                    code: 'RAB_SETUP_FAILURE',
+                    label: 'RAB Setup Failure',
+                    cause: 'code shortage, power congestion'
+                };
+            }
+            if (session.sawRlfBeforeConnect) {
+                return {
+                    code: 'EARLY_RADIO_FAILURE',
+                    label: 'Early Radio Failure',
+                    cause: 'very poor RSCP / EcNo'
+                };
+            }
+            return {
+                code: 'UNKNOWN_FAILURE',
+                label: 'Unknown Failure',
+                cause: 'unclassified call setup failure'
+            };
+        };
+
+        const endSession = (session, endTime, endTrigger, endType, asDrop) => {
+            if (!session || session.state === 'ENDED') return;
+            session.state = 'ENDED';
+            session.endTime = endTime || session.endTime;
+            const hasCallContext = !!(session.callTransactionId && String(session.callTransactionId).trim());
+            const requestedEndType = endType || session.endType || 'UNKNOWN';
+            const normalizedEndType = (!hasCallContext && requestedEndType === 'DROP')
+                ? 'RRC_SESSION_ABNORMAL_END'
+                : requestedEndType;
+            const normalizedTrigger = (!hasCallContext && endTrigger === 'UNEXPECTED_IDLE_TRANSITION')
+                ? 'RRC_IDLE_TRANSITION'
+                : endTrigger;
+            session.endTrigger = normalizedTrigger || session.endTrigger;
+            session.endType = normalizedEndType;
+            session.drop = hasCallContext ? !!asDrop : false;
+            session.resultType = session.kind === 'RRC_SESSION'
+                ? (session.drop ? 'RRC_SESSION_ABNORMAL_END' : 'RRC_SESSION')
+                : session.resultType;
+            session.callFailed = false;
+            session.callSetupSuccess = false;
+            session.failureReason = null;
+
+            const startMs = parseTimeToMs(session.startTime);
+            const endMs = parseTimeToMs(session.endTime);
+            const durationMs = (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs >= startMs) ? (endMs - startMs) : null;
+            session.durationMs = durationMs;
+
+            if (session.hasConnect) {
+                session.callSetupSuccess = true;
+                session.setupFailure = false;
+                session.failureReason = null;
+                return;
+            }
+
+            // Single truth rule: attempt started + no CONNECT + ended => Call Setup Failure.
+            if (session.attemptStarted) {
+                if (durationMs !== null && durationMs < minValidAttemptMs) {
+                    session.ignored = true;
+                    session.setupFailure = false;
+                    session.callFailed = false;
+                    session.endType = 'IGNORED_SHORT_ATTEMPT';
+                    session.drop = false;
+                    session.failureReason = null;
+                    return;
+                }
+
+                if (durationMs !== null && durationMs > maxSetupWindowMs) {
+                    session.incomplete = true;
+                    session.setupFailure = false;
+                    session.callFailed = false;
+                    session.endType = 'INCOMPLETE_OR_ONGOING';
+                    session.drop = false;
+                    session.failureReason = null;
+                    return;
+                }
+
+                session.setupFailure = true;
+                session.callFailed = true;
+                session.endType = 'CALL_SETUP_FAILURE';
+                session.drop = false;
+                session.failureReason = classifyFailureReason(session);
+            }
+        };
+
+        const moveState = (session, nextState) => {
+            if (!session || !nextState) return;
+            session.state = nextState;
+        };
+
+        const resolveRuntimeKey = (baseKey) => {
+            if (baseKey !== '__ANON__') return baseKey;
+            const activeKeys = Array.from(stateByKey.entries())
+                .filter(([k, st]) => k !== '__ANON__' && st.activeSession && st.activeSession.state !== 'ENDED')
+                .map(([k]) => k);
+            if (activeKeys.length === 1) return activeKeys[0];
+            return '__ANON__';
+        };
+
+        for (const rec of sortedRecords) {
+            const ids = extractIdentifiers(rec);
+            const key = resolveRuntimeKey(getCorrelationKey(ids));
+            const keyState = ensureKeyState(key);
+            const sem = parseSemanticFlags(rec);
+            const recMs = parseTimeToMs(rec.time);
+
+            const prevRrc = keyState.ueRrcState;
+            const parsedRrc = parseRrcFromRecord(rec);
+            if (parsedRrc) keyState.ueRrcState = parsedRrc;
+            const isIdleNow = isIdleState(keyState.ueRrcState);
+            const wasIdle = isIdleState(prevRrc);
+            const active = keyState.activeSession && keyState.activeSession.state !== 'ENDED' ? keyState.activeSession : null;
+
+            if (!active && wasIdle && sem.isRrcConnectionRequest) {
+                keyState.pendingRrcRequestMs = recMs;
+                keyState.pendingRrcRequestTime = rec.time;
+            }
+
+            let session = active;
+
+            const primaryStart = wasIdle && (sem.isCmServiceRequest || sem.isSetupMoMt);
+            const secondaryStart = wasIdle && (sem.isRabAssignmentRequest || sem.isCallProceeding);
+            const startFromRrcThenNas = (
+                !session &&
+                keyState.pendingRrcRequestMs !== null &&
+                !Number.isNaN(recMs) &&
+                sem.isNasCallControl &&
+                recMs >= keyState.pendingRrcRequestMs &&
+                (recMs - keyState.pendingRrcRequestMs) <= rrcNasFollowMs
+            );
+
+            if (!session && (primaryStart || secondaryStart || startFromRrcThenNas)) {
+                let trigger = 'START_FALLBACK';
+                let startTime = rec.time;
+                if (primaryStart) trigger = sem.isCmServiceRequest ? 'CM_SERVICE_REQUEST' : 'SETUP';
+                else if (secondaryStart) trigger = sem.isRabAssignmentRequest ? 'RAB_ASSIGNMENT_REQUEST' : 'CALL_PROCEEDING';
+                else if (startFromRrcThenNas) {
+                    trigger = 'RRC_CONNECTION_REQUEST_PLUS_NAS_CC';
+                    startTime = keyState.pendingRrcRequestTime || rec.time;
+                }
+
+                session = createSession(startTime, ids, trigger);
+                keyState.activeSession = session;
+                keyState.pendingRrcRequestMs = null;
+                keyState.pendingRrcRequestTime = null;
+            }
+
+            if (session) {
+                appendToSession(session, rec, ids);
+
+                const recEndMs = parseTimeToMs(rec.time);
+                const sessionEndMs = parseTimeToMs(session.endTime);
+                if (!Number.isNaN(recEndMs) && !Number.isNaN(sessionEndMs) && recEndMs > sessionEndMs + timeWindowMs) {
+                    endSession(session, session.endTime, 'TIME_WINDOW_EXCEEDED', 'NORMAL', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+
+                if (sem.isRrcSetupComplete) moveState(session, 'RRC_CONNECTED');
+                if (sem.isRrcSetupComplete) session.sawRrcSetupComplete = true;
+                if (sem.isRrcConnectionReject) session.sawRrcConnectionReject = true;
+                if (sem.isCmServiceReject) session.sawCmServiceReject = true;
+                if (sem.isCallReject) session.sawCallReject = true;
+                if (sem.isRabAssignmentFailure) session.sawRabAssignmentFailure = true;
+                if (sem.isRabRelease && !session.hasConnect) session.sawRabReleaseBeforeConnect = true;
+                if (sem.isRlf && !session.hasConnect) session.sawRlfBeforeConnect = true;
+                if (sem.isRabAssignComplete) {
+                    session.hasCsRab = true;
+                    moveState(session, 'RAB_ESTABLISHED');
+                }
+                if (sem.isConnect) {
+                    session.hasConnect = true;
+                    moveState(session, 'ACTIVE_CALL');
+                }
+                if (sem.isDisconnect) {
+                    session.disconnectSeen = true;
+                    moveState(session, 'RELEASING');
+                }
+                if (session.hasCsRab && !isIdleNow && session.state !== 'ENDED' && !session.hasConnect) {
+                    moveState(session, 'RAB_ESTABLISHED');
+                }
+
+                const connectEstablished = !!session.hasConnect;
+                const abnormalAfterConnect = connectEstablished && !session.normalClearingSeen;
+
+                if (sem.isRlf) {
+                    endSession(session, rec.time, 'RADIO_LINK_FAILURE', abnormalAfterConnect ? 'DROP' : 'CALL_SETUP_FAILURE', abnormalAfterConnect);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isIuReleaseAbnormal) {
+                    endSession(session, rec.time, 'IU_RELEASE_ABNORMAL', abnormalAfterConnect ? 'DROP' : 'CALL_SETUP_FAILURE', abnormalAfterConnect);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isRrcReleaseAbnormal) {
+                    endSession(session, rec.time, 'RRC_CONNECTION_RELEASE_ABNORMAL', abnormalAfterConnect ? 'DROP' : 'CALL_SETUP_FAILURE', abnormalAfterConnect);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isHoFailure && (sem.isRelease || sem.isRrcRelease || sem.isIuRelease)) {
+                    endSession(session, rec.time, 'HANDOVER_FAILURE_RELEASE', abnormalAfterConnect ? 'DROP' : 'CALL_SETUP_FAILURE', abnormalAfterConnect);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (connectEstablished && sem.isIuRelease && !session.disconnectSeen && !session.normalClearingSeen) {
+                    endSession(session, rec.time, 'MSC_RELEASE_WITHOUT_DISCONNECT', 'DROP', true);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isRrcReleaseNormal || (sem.isRrcRelease && session.disconnectSeen)) {
+                    session.normalClearingSeen = true;
+                    endSession(session, rec.time, 'RRC_CONNECTION_RELEASE_NORMAL', 'NORMAL', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isCmServiceReject) {
+                    endSession(session, rec.time, 'CM_SERVICE_REJECT', 'CALL_SETUP_FAILURE', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isCallReject) {
+                    endSession(session, rec.time, 'CALL_REJECT', 'CALL_SETUP_FAILURE', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isRabRelease && !session.hasConnect) {
+                    endSession(session, rec.time, 'RAB_RELEASE', 'CALL_SETUP_FAILURE', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isIuRelease && !session.hasConnect) {
+                    endSession(session, rec.time, 'IU_RELEASE', 'CALL_SETUP_FAILURE', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isDisconnect && sem.isRelease) {
+                    session.normalClearingSeen = true;
+                    endSession(session, rec.time, 'DISCONNECT_RELEASE', 'NORMAL', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+
+                const transitionedToIdle = !isIdleState(prevRrc) && isIdleNow;
+                if (transitionedToIdle) {
+                    const expected = session.disconnectSeen || sem.isRelease || sem.isRrcReleaseNormal;
+                    if (expected) endSession(session, rec.time, 'RETURN_TO_IDLE', 'NORMAL', false);
+                    else endSession(session, rec.time, 'RRC_IDLE_TRANSITION', 'NORMAL', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+            }
+        }
+
+        return sessions;
+    }
+};
+
+const UmtsCallAnalyzer = {
+    analyze(content, options = {}) {
+        const windowSeconds = Number.isFinite(options.windowSeconds) ? options.windowSeconds : 10;
+
+        const parseCsvLine = (line) => {
+            const out = [];
+            let cur = '';
+            let inQuotes = false;
+            for (let i = 0; i < line.length; i++) {
+                const ch = line[i];
+                if (ch === '"') {
+                    if (inQuotes && line[i + 1] === '"') {
+                        cur += '"';
+                        i += 1;
+                    } else {
+                        inQuotes = !inQuotes;
+                    }
+                    continue;
+                }
+                if (ch === ',' && !inQuotes) {
+                    out.push(cur);
+                    cur = '';
+                    continue;
+                }
+                cur += ch;
+            }
+            out.push(cur);
+            return out;
+        };
+
+        const parseNumber = (v) => {
+            if (v === undefined || v === null || v === '') return null;
+            const n = parseFloat(String(v).trim());
+            return Number.isFinite(n) ? n : null;
+        };
+        const median = (vals) => {
+            if (!vals.length) return null;
+            const a = vals.slice().sort((x, y) => x - y);
+            const mid = Math.floor(a.length / 2);
+            return a.length % 2 === 0 ? (a[mid - 1] + a[mid]) / 2 : a[mid];
+        };
+        const percentile = (vals, p) => {
+            if (!vals.length) return null;
+            const a = vals.slice().sort((x, y) => x - y);
+            const idx = Math.ceil((p / 100) * a.length) - 1;
+            return a[Math.max(0, Math.min(a.length - 1, idx))];
+        };
+        const stddev = (vals) => {
+            if (!vals || vals.length < 2) return 0;
+            const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+            const variance = vals.reduce((acc, v) => acc + ((v - mean) ** 2), 0) / vals.length;
+            return Math.sqrt(variance);
+        };
+        const modeNumber = (vals) => {
+            if (!Array.isArray(vals) || !vals.length) return null;
+            const counts = new Map();
+            let bestValue = null;
+            let bestCount = 0;
+            for (const v of vals) {
+                if (!Number.isFinite(v)) continue;
+                const next = (counts.get(v) || 0) + 1;
+                counts.set(v, next);
+                if (next > bestCount) {
+                    bestCount = next;
+                    bestValue = v;
+                }
+            }
+            return Number.isFinite(bestValue) ? bestValue : null;
+        };
+        const getBestServerFromMimo = (blocks) => {
+            const list = Array.isArray(blocks) ? blocks : [];
+            return list.reduce((best, c) => {
+                if (!c || !Number.isFinite(c.rscp)) return best;
+                return (!best || c.rscp > best.rscp) ? c : best;
+            }, null);
+        };
+        const lowerBound = (rows, ts) => {
+            let lo = 0;
+            let hi = rows.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (rows[mid].ts < ts) lo = mid + 1;
+                else hi = mid;
+            }
+            return lo;
+        };
+        const upperBound = (rows, ts) => {
+            let lo = 0;
+            let hi = rows.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (rows[mid].ts <= ts) lo = mid + 1;
+                else hi = mid;
+            }
+            return lo;
+        };
+
+        const parseStartDate = (parts) => {
+            for (const raw of parts) {
+                const txt = String(raw || '').trim().replace(/^"|"$/g, '');
+                const m = txt.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+                if (!m) continue;
+                return {
+                    day: parseInt(m[1], 10),
+                    month: parseInt(m[2], 10),
+                    year: parseInt(m[3], 10)
+                };
+            }
+            return null;
+        };
+        const parseTodMs = (txt) => {
+            const m = String(txt || '').trim().match(/^(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+            if (!m) return null;
+            const hh = parseInt(m[1], 10);
+            const mm = parseInt(m[2], 10);
+            const ss = parseInt(m[3], 10);
+            const ms = parseInt((m[4] || '0').padEnd(3, '0'), 10);
+            return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
+        };
+
+        const tsState = { baseUtcMs: null, prevTodMs: null, dayOffset: 0 };
+        const setBaseDate = (dmy) => {
+            if (!dmy) return;
+            if (dmy.month < 1 || dmy.month > 12) return;
+            if (dmy.day < 1 || dmy.day > 31) return;
+
+            const newBase = Date.UTC(dmy.year, dmy.month - 1, dmy.day, 0, 0, 0, 0);
+
+            // Protect against periodic duplicate headers rewinding the timeline
+            if (tsState.baseUtcMs && newBase <= tsState.baseUtcMs) return;
+
+            tsState.baseUtcMs = newBase;
+            tsState.prevTodMs = null;
+            tsState.dayOffset = 0;
+        };
+        const buildAbsMs = (todText) => {
+            if (!Number.isFinite(tsState.baseUtcMs)) return null;
+            const todMs = parseTodMs(todText);
+            if (!Number.isFinite(todMs)) return null;
+            const nearEnd = tsState.prevTodMs > 18 * 3600 * 1000;
+            const nearStart = todMs < 6 * 3600 * 1000;
+            if (Number.isFinite(tsState.prevTodMs) && nearEnd && nearStart && todMs < tsState.prevTodMs) {
+                tsState.dayOffset += 1;
+            }
+            tsState.prevTodMs = todMs;
+            return tsState.baseUtcMs + tsState.dayOffset * 24 * 3600 * 1000 + todMs;
+        };
+
+        const radioStore = { byDevice: new Map() };
+        const eventsByDevice = new Map();
+        const CALL_HEADERS = new Set(['CAA', 'CAC', 'CAD', 'CAF', 'CARE']);
+        const UMTS_TIMELINE_HEADERS = new Set([
+            'RRCSM', 'L3SM', 'L3MM',
+            'RRC', 'RRA', 'RRD', 'RRF',
+            'RABA', 'RABD', 'RBI',
+            'SHO', 'CELLMEAS'
+        ]);
+        const getDeviceStore = (deviceId) => {
+            const key = String(deviceId || '');
+            let dev = radioStore.byDevice.get(key);
+            if (!dev) {
+                dev = { mimoRows: [], txpcRows: [], rlcRows: [], cellmeasRows: [] };
+                radioStore.byDevice.set(key, dev);
+            }
+            return dev;
+        };
+        const addDeviceEvent = (deviceId, ts, header, parts) => {
+            const key = String(deviceId || '');
+            let arr = eventsByDevice.get(key);
+            if (!arr) {
+                arr = [];
+                eventsByDevice.set(key, arr);
+            }
+            arr.push({ ts, header, raw: parts.join(',') });
+        };
+        const parseMimoSamples = (parts, techId) => {
+            const start = 7;
+            const remaining = parts.length - start;
+            if (remaining <= 0) return [];
+            const out = [];
+
+            if (techId === 7) {
+                // LTE MIMOMEAS rows in this Nemo export use 9-field samples:
+                // [bandCode, earfcn, pci, branchIdx, typeCode, auxPower, rsrq, rsrp, cellId]
+                if (remaining % 9 !== 0) return [];
+                for (let i = start; i + 8 < parts.length; i += 9) {
+                    const bandCode = parseNumber(parts[i]);
+                    const earfcn = parseNumber(parts[i + 1]);
+                    const pci = parseNumber(parts[i + 2]);
+                    const branchIdx = parseNumber(parts[i + 3]);
+                    const typeCode = parseNumber(parts[i + 4]);
+                    const rawPower = parseNumber(parts[i + 5]);
+                    const rsrq = parseNumber(parts[i + 6]);
+                    const rsrp = parseNumber(parts[i + 7]);
+                    const cellId = parseNumber(parts[i + 8]);
+                    if (pci === null || rsrp === null || rsrq === null) continue;
+                    out.push({
+                        sc: pci,
+                        psc: null,
+                        pci,
+                        rscp: rsrp,
+                        ecno: rsrq,
+                        rssi: null,
+                        rawPower,
+                        typeCode,
+                        branchIdx,
+                        bandCode,
+                        cellId,
+                        uarfcn: null,
+                        earfcn
+                    });
+                }
+                return out;
+            }
+
+            let blockSize = 8;
+            if (remaining % 8 !== 0) {
+                if (remaining % 9 === 0) blockSize = 9;
+                else return [];
+            }
+            for (let i = start; i + blockSize - 1 < parts.length; i += blockSize) {
+                const cellId = parseNumber(parts[i]);
+                const uarfcn = parseNumber(parts[i + 1]);
+                const psc = parseNumber(parts[i + 2]);
+                const rscp = parseNumber(parts[i + 5]);
+                const ecno = parseNumber(parts[i + 6]);
+                const rssi = parseNumber(parts[i + 7]);
+                if (psc === null || rscp === null || ecno === null) continue;
+
+                out.push({
+                    sc: psc,
+                    psc: techId === 5 ? psc : null,
+                    pci: null,
+                    rscp,
+                    ecno,
+                    rssi,
+                    cellId,
+                    uarfcn,
+                    earfcn: null
+                });
+            }
+            return out;
+        };
+        const parseRlcBler = (parts) => {
+            const decimalNums = [];
+            for (let i = 4; i < parts.length; i++) {
+                const raw = String(parts[i] || '').trim();
+                if (!raw) continue;
+                const n = parseNumber(raw);
+                if (n === null) continue;
+                if (n >= 0 && n <= 100) {
+                    if (raw.includes('.')) decimalNums.push(n);
+                }
+            }
+            const nums = decimalNums;
+            if (!nums.length) return null;
+            return {
+                blerMax: nums.reduce((a, b) => (a > b ? a : b), -Infinity),
+                blerMean: nums.reduce((a, b) => a + b, 0) / nums.length
+            };
+        };
+        const parseUmtsCellmeasDominance = (parts) => {
+            const techId = parseInt(parts[3], 10);
+            if (techId !== 5) return null;
+            const looksLikePlmn = (v) => /^[0-9]{5}$/.test(String(v || '').trim());
+            const validSc = (v) => Number.isFinite(v) && v >= 0 && v <= 511;
+            const looksLikeRefPower = (v) => Number.isFinite(v) && v <= -50 && v >= -120;
+            const looksLikeQuality = (v) => Number.isFinite(v) && v <= 0 && v >= -30;
+            const looksLikeRscp = (v) => Number.isFinite(v) && v <= -50 && v >= -120;
+            const blockMap = new Map();
+            for (let k = 0; k < parts.length - 6; k++) {
+                const setType = parseInt(parts[k], 10);
+                if (!Number.isFinite(setType) || setType < 0 || setType > 3) continue;
+                const plmn = String(parts[k + 1] || '').trim();
+                const freq = parseNumber(parts[k + 2]);
+                const sc = parseInt(parts[k + 3], 10);
+                const x1 = parseNumber(parts[k + 4]);
+                const x2 = parseNumber(parts[k + 5]);
+                const x3 = parseNumber(parts[k + 6]);
+                if (!looksLikePlmn(plmn) || !Number.isFinite(freq) || freq <= 2000 || !validSc(sc)) continue;
+
+                let subtype = null;
+                let rscp = null;
+                if (looksLikeRefPower(x1) && looksLikeQuality(x3)) {
+                    subtype = 'A';
+                    rscp = x1;
+                } else if (looksLikeQuality(x1) && looksLikeRscp(x3)) {
+                    subtype = 'B';
+                    rscp = x3;
+                } else {
+                    continue;
+                }
+
+                const key = `${Math.round(freq)}:${sc}`;
+                const existing = blockMap.get(key);
+                const prio = setType <= 1 ? 0 : setType;
+                const existingPrio = existing ? (existing.setType <= 1 ? 0 : existing.setType) : 999;
+                const hasRscp = Number.isFinite(rscp);
+                const existingHasRscp = existing ? Number.isFinite(existing.rscp) : false;
+                if (!existing || prio < existingPrio || (prio === existingPrio && hasRscp && !existingHasRscp)) {
+                    blockMap.set(key, { setType, freq, sc, subtype, rscp });
+                }
+            }
+
+            const blocks = Array.from(blockMap.values());
+            const subtypeAcount = blocks.filter((b) => b.subtype === 'A').length;
+            const subtypeBcount = blocks.filter((b) => b.subtype === 'B').length;
+            // Dominance from CELLMEAS is valid only for subtype-A (RSCP-bearing) rows.
+            const rscpVals = blocks
+                .filter((b) => b && b.subtype === 'A')
+                .map((b) => b.rscp)
+                .filter((v) => Number.isFinite(v))
+                .sort((a, b) => b - a);
+            const delta = rscpVals.length >= 2 ? (rscpVals[0] - rscpVals[1]) : null;
+            return {
+                techId,
+                subtypeAcount,
+                subtypeBcount,
+                totalNeighbors: blocks.length,
+                rscpNeighborCount: rscpVals.length,
+                delta
+            };
+        };
+        const addRadio = (header, parts, ts, deviceId, currentRatState) => {
+            const dev = getDeviceStore(deviceId);
+            const techId = parseInt(parts[3], 10);
+            const isTechIdValid = Number.isFinite(techId);
+
+            if (header === 'MIMOMEAS') {
+                const samples = parseMimoSamples(parts, techId);
+                if (samples.length) {
+                    dev.mimoRows.push({
+                        ts,
+                        rat: currentRatState || 'UNKNOWN',
+                        techId: isTechIdValid ? techId : null,
+                        samples
+                    });
+                }
+                return;
+            }
+            if (header === 'TXPC') {
+                const tx = parseNumber(parts[4]);
+                if (tx !== null) dev.txpcRows.push({ ts, tx });
+                return;
+            }
+            if (header === 'RLCBLER') {
+                const row = parseRlcBler(parts);
+                if (row) dev.rlcRows.push({ ts, blerMax: row.blerMax, blerMean: row.blerMean });
+                return;
+            }
+            if (header === 'CELLMEAS') {
+                const row = parseUmtsCellmeasDominance(parts);
+                if (row) {
+                    dev.cellmeasRows.push({
+                        ts,
+                        rat: currentRatState || 'UNKNOWN',
+                        ...row
+                    });
+                }
+            }
+        };
+        const buildSnapshot = (endTs, deviceId) => {
+            if (!Number.isFinite(endTs)) return null;
+            const dev = getDeviceStore(deviceId);
+            const fromTs = endTs - (Math.max(1, windowSeconds) * 1000);
+            const snap = {
+                mimoSampleCount: 0,
+                txSampleCountValid: 0,
+                blerRowCount: 0,
+                sampleCount: 0,
+                trendMinSamples: 2,
+                rscpMedian: null, rscpMin: null, rscpLast: null,
+                ecnoMedian: null, ecnoMin: null, ecnoLast: null,
+                lastPsc: null, lastCellId: null, lastUarfcn: null,
+                lastMimoTs: null, lastTxTs: null, lastBestServer: null,
+                txP90: null, txMax: null, txLast: null,
+                blerMax: null, blerMean: null,
+                rlcBlerSamplesCount: 0,
+                blerEvidenceMinSamples: 3,
+                blerEvidence: false,
+                bestServerSamples: [],
+                uniquePscCount: 0,
+                seriesRscp: [],
+                seriesEcno: [],
+                rscpTrendDelta: null,
+                ecnoTrendDelta: null,
+                trendDurationSec: null,
+                pilotDominanceDeltaMedian: null,
+                pilotDominanceLowCount: 0,
+                pilotDominanceSampleCount: 0,
+                pilotDominanceLowRatio: null,
+                pilotDominanceDeltaStd: null,
+                activeSetSizeMean: null,
+                activeSetSizeMax: null,
+                badEcnoStrongRscpRatio: null,
+                strongBadCount: 0,
+                validBestCount: 0,
+                pscSwitchCount: 0,
+                pollutionScore: null,
+                pollutionLevel: null,
+                pilotPollution: null,
+                pilotPollutionDetected: null,
+                pilotPollutionEvidence: []
+            };
+            let localRatState = 'UNKNOWN';
+            let lastRatChangeTs = null;
+            const TRANSITION_WINDOW_MS = 500;
+
+            const mFrom = lowerBound(dev.mimoRows, fromTs);
+            const mTo = upperBound(dev.mimoRows, endTs);
+            const best = [];
+            const dominanceDeltas = [];
+            const simultaneousPilotCounts = [];
+            let validUmtsMimoSamples = 0;
+
+            const lteDominanceDeltas = [];
+            let validLteMimoSamples = 0;
+
+            let dominantRatAtEnd = 'UNKNOWN';
+            // First search primary CHI track, it perfectly anchors the RAT at failure
+            if (dev.chiRows && dev.chiRows.length > 0) {
+                for (let i = dev.chiRows.length - 1; i >= 0; i--) {
+                    const r = dev.chiRows[i];
+                    if (r.ts <= endTs && r.state && (r.state.rat === 'UMTS' || r.state.rat === 'LTE')) {
+                        dominantRatAtEnd = r.state.rat;
+                        break;
+                    }
+                }
+            }
+            // Fallback to mimoRows measurement tracking if CHI did not yield one
+            if (dominantRatAtEnd === 'UNKNOWN') {
+                for (let i = dev.mimoRows.length - 1; i >= 0; i--) {
+                    const r = dev.mimoRows[i];
+                    if (r.ts <= endTs && (r.rat === 'UMTS' || r.rat === 'LTE')) {
+                        dominantRatAtEnd = r.rat;
+                        break;
+                    }
+                }
+            }
+
+            for (let i = 0; i < dev.mimoRows.length; i++) {
+                // We track RAT changes globally through all mimoRows
+                const row = dev.mimoRows[i];
+                const rat = (row.rat === 'UMTS' || row.rat === 'LTE')
+                    ? row.rat
+                    : (row.techId === 5 ? 'UMTS' : row.techId === 7 ? 'LTE' : null);
+
+                if (rat && rat !== localRatState) {
+                    localRatState = rat;
+                    lastRatChangeTs = row.ts;
+                }
+
+                // But only process rows within our window bounds for metrics
+                if (i < mFrom || i >= mTo) continue;
+
+                // Validate transition window: Do not compute pollution if we recently transitioned
+                const isTransitioning = lastRatChangeTs && (row.ts - lastRatChangeTs) < TRANSITION_WINDOW_MS;
+                if (isTransitioning) continue;
+
+                // Restrict pollution logic to either UMTS or LTE
+                if (localRatState !== 'UMTS' && localRatState !== 'LTE') continue;
+
+                // Ignore stub rows without actual cell payload data
+                if (!row.samples || row.samples.length === 0) continue;
+
+                const byPsc = new Map();
+                row.samples.forEach(s => {
+                    const id = s.sc ?? s.pci ?? s.psc;
+                    const key = String(id);
+                    const cur = byPsc.get(key) || {
+                        id,
+                        rscpSum: 0, ecnoSum: 0, rssiSum: 0, rssiCount: 0, count: 0,
+                        cellId: s.cellId, freq: s.uarfcn ?? s.earfcn
+                    };
+                    cur.rscpSum += s.rscp;
+                    cur.ecnoSum += s.ecno;
+                    if (Number.isFinite(s.rssi)) {
+                        cur.rssiSum += s.rssi;
+                        cur.rssiCount += 1;
+                    }
+                    cur.count += 1;
+                    byPsc.set(key, cur);
+                });
+                const blocks = [];
+                byPsc.forEach(v => {
+                    const avgRscp = v.rscpSum / v.count;
+                    if (Number.isFinite(avgRscp)) {
+                        blocks.push({
+                            ts: row.ts,
+                            sc: v.id,
+                            freq: v.freq,
+                            rscp: avgRscp,
+                            ecno: v.ecnoSum / v.count,
+                            rssi: v.rssiCount > 0 ? (v.rssiSum / v.rssiCount) : null,
+                            cellId: v.cellId
+                        });
+                    }
+                });
+
+                if (blocks.length > 0) {
+                    if (localRatState === 'UMTS') validUmtsMimoSamples += 1;
+                    else if (localRatState === 'LTE') validLteMimoSamples += 1;
+                }
+                if (localRatState === 'UMTS') {
+                    if (blocks.length) simultaneousPilotCounts.push(blocks.length);
+                    if (blocks.length >= 2) {
+                        const sorted = blocks.slice().sort((a, b) => b.rscp - a.rscp);
+                        const delta = sorted[0].rscp - sorted[1].rscp;
+                        if (Number.isFinite(delta)) dominanceDeltas.push(delta);
+                    }
+                } else if (localRatState === 'LTE') {
+                    if (blocks.length >= 2) {
+                        const sortedLte = blocks.slice().sort((a, b) => b.rscp - a.rscp); // using rscp field which mapped rsrp actually
+                        const deltaLte = sortedLte[0].rscp - sortedLte[1].rscp;
+                        if (Number.isFinite(deltaLte)) lteDominanceDeltas.push(deltaLte);
+                    }
+                }
+                const bestSample = getBestServerFromMimo(blocks);
+                if (bestSample) {
+                    best.push({ ...bestSample, rat: localRatState });
+                }
+            }
+            if (best.length) {
+                const rscpVals = best.map(x => x.rscp);
+                const ecnoVals = best.map(x => x.ecno);
+                const last = best[best.length - 1];
+                snap.rscpMedian = median(rscpVals);
+                snap.rscpMin = Math.min(...rscpVals);
+                snap.rscpLast = last.rscp;
+                snap.ecnoMedian = median(ecnoVals);
+                snap.ecnoMin = Math.min(...ecnoVals);
+                snap.ecnoLast = last.ecno;
+                snap.lastPsc = last.sc;
+                snap.lastCellId = last.cellId;
+                snap.lastUarfcn = last.freq;
+                snap.bestServerSamples = best;
+                snap.uniquePscCount = new Set(best.map(x => String(x.sc))).size;
+                snap.lastMimoTs = last.ts;
+                snap.lastBestServer = {
+                    psc: last.sc,
+                    uarfcn: last.freq,
+                    cellId: last.cellId,
+                    rscp: last.rscp,
+                    ecno: last.ecno,
+                    rssi: Number.isFinite(last.rssi) ? last.rssi : null
+                };
+                snap.seriesRscp = best.map(v => ({ ts: v.ts, value: v.rscp }));
+                snap.seriesEcno = best.map(v => ({ ts: v.ts, value: v.ecno }));
+                const validBest = best.filter(v => Number.isFinite(v.rscp) && Number.isFinite(v.ecno));
+                const validBestCount = validBest.length;
+                const strongRscpCount = validBest.filter(v => v.rscp > -85).length;
+                const strongBadCount = validBest.filter(v => v.rscp > -85 && v.ecno < -14).length;
+                snap.validBestCount = validBestCount;
+                snap.strongBadCount = strongBadCount;
+                snap.badEcnoStrongRscpRatio = strongRscpCount ? (strongBadCount / strongRscpCount) : null;
+                let switches = 0;
+                for (let i = 1; i < best.length; i++) {
+                    if (best[i].sc !== best[i - 1].sc) switches += 1;
+                }
+                snap.pscSwitchCount = switches;
+            }
+            if (dominanceDeltas.length) {
+                snap.pilotDominanceSampleCount = dominanceDeltas.length;
+                snap.pilotDominanceDeltaMedian = median(dominanceDeltas);
+                snap.pilotDominanceDeltaStd = stddev(dominanceDeltas);
+                snap.pilotDominanceLowCount = dominanceDeltas.filter(d => Number.isFinite(d) && d < 3).length;
+                snap.pilotDominanceLowRatio = snap.pilotDominanceLowCount / dominanceDeltas.length;
+            }
+            if (lteDominanceDeltas.length) {
+                snap.lteDominanceSampleCount = lteDominanceDeltas.length;
+                snap.lteDominanceDeltaMedian = median(lteDominanceDeltas);
+                snap.lteDominanceLowCount = lteDominanceDeltas.filter(d => Number.isFinite(d) && d < 3).length;
+                snap.lteDominanceLowRatio = snap.lteDominanceLowCount / lteDominanceDeltas.length;
+            }
+            if (simultaneousPilotCounts.length) {
+                snap.activeSetSizeMean = simultaneousPilotCounts.reduce((a, b) => a + b, 0) / simultaneousPilotCounts.length;
+                snap.activeSetSizeMax = Math.max(...simultaneousPilotCounts);
+            }
+            // Preload TX/BLER so interference scoring can use finalized metrics.
+            const preTxFrom = lowerBound(dev.txpcRows, fromTs);
+            const preTxTo = upperBound(dev.txpcRows, endTs);
+            if (preTxTo > preTxFrom) {
+                const txValues = dev.txpcRows.slice(preTxFrom, preTxTo).map(v => v.tx).filter(v => Number.isFinite(v));
+                if (txValues.length) {
+                    snap.txP90 = computeP90(txValues);
+                    snap.txMax = Math.max(...txValues);
+                    snap.txLast = txValues[txValues.length - 1];
+                }
+            }
+            const preRFrom = lowerBound(dev.rlcRows, fromTs);
+            const preRTo = upperBound(dev.rlcRows, endTs);
+            if (preRTo > preRFrom) {
+                const blerRowsPre = dev.rlcRows.slice(preRFrom, preRTo);
+                snap.blerMax = blerRowsPre.reduce((m, r) => (r.blerMax > m ? r.blerMax : m), -Infinity);
+                snap.blerMean = blerRowsPre.reduce((a, b) => a + b, 0) / blerRowsPre.length;
+            }
+            const cellmeasRows = Array.isArray(dev.cellmeasRows) ? dev.cellmeasRows : [];
+            const cFrom = lowerBound(cellmeasRows, fromTs);
+            const cTo = upperBound(cellmeasRows, endTs);
+            const cellmeasDeltas = [];
+            let cellmeasUmtsRows = 0;
+            let cellmeasSubtypeARows = 0;
+            let cellmeasSubtypeBOnlyRows = 0;
+            for (let i = cFrom; i < cTo; i++) {
+                const row = cellmeasRows[i];
+                if (!row || row.techId !== 5) continue;
+                cellmeasUmtsRows += 1;
+                if (row.subtypeAcount > 0) cellmeasSubtypeARows += 1;
+                if (row.subtypeAcount === 0 && row.subtypeBcount > 0) cellmeasSubtypeBOnlyRows += 1;
+                if (row.subtypeAcount > 0 && Number.isFinite(row.delta)) cellmeasDeltas.push(row.delta);
+            }
+            const cellmeasDominanceAvailable = cellmeasDeltas.length > 0;
+            const cellmeasDeltaMedian = cellmeasDominanceAvailable ? median(cellmeasDeltas) : null;
+            const cellmeasLt3dbRatio = cellmeasDominanceAvailable
+                ? (cellmeasDeltas.filter((d) => Number.isFinite(d) && d < 3).length / cellmeasDeltas.length)
+                : null;
+            const cellmeasCoverageRatio = cellmeasUmtsRows > 0 ? (cellmeasDeltas.length / cellmeasUmtsRows) : null;
+            const cellmeasSubtypeACoverageRatio = cellmeasSubtypeARows > 0 ? (cellmeasDeltas.length / cellmeasSubtypeARows) : null;
+            const cellmeasLowCoverage = !Number.isFinite(cellmeasCoverageRatio) || cellmeasCoverageRatio < 0.30;
+            const cellmeasUnavailableReason = cellmeasUmtsRows === 0
+                ? 'no UMTS CELLMEAS rows in window'
+                : (cellmeasSubtypeARows === 0 && cellmeasSubtypeBOnlyRows > 0)
+                    ? 'neighbor RSCP unavailable (unsupported CELLMEAS subtype)'
+                    : 'no >=2 subtype-A pilots per timestamp';
+            const dominanceSourceLine = (!cellmeasDominanceAvailable && cellmeasUnavailableReason === 'neighbor RSCP unavailable (unsupported CELLMEAS subtype)')
+                ? 'Dominance source: MIMOMEAS-only (CELLMEAS RSCP unavailable).'
+                : null;
+            const deltaMedianRaw = dominantRatAtEnd === 'LTE' ? (Number.isFinite(snap.lteDominanceDeltaMedian) ? snap.lteDominanceDeltaMedian : null) : (Number.isFinite(snap.pilotDominanceDeltaMedian) ? snap.pilotDominanceDeltaMedian : null);
+            const deltaRatioRaw = dominantRatAtEnd === 'LTE' ? (Number.isFinite(snap.lteDominanceLowRatio) ? snap.lteDominanceLowRatio : null) : (Number.isFinite(snap.pilotDominanceLowRatio) ? snap.pilotDominanceLowRatio : null);
+            const deltaStdRaw = dominantRatAtEnd === 'LTE' ? null : (Number.isFinite(snap.pilotDominanceDeltaStd) ? snap.pilotDominanceDeltaStd : null);
+
+            const pscSwitchCount = Number.isFinite(snap.pscSwitchCount) ? snap.pscSwitchCount : 0;
+            const observedPilotMean = Number.isFinite(snap.activeSetSizeMean) ? snap.activeSetSizeMean : 0;
+            const observedPilotMax = Number.isFinite(snap.activeSetSizeMax) ? snap.activeSetSizeMax : 0;
+            const totalMimoSamples = best.length;
+
+            const samplesWith2Pilots = dominantRatAtEnd === 'LTE' ? lteDominanceDeltas.length : dominanceDeltas.length;
+            const validDenominator = dominantRatAtEnd === 'LTE' ? validLteMimoSamples : validUmtsMimoSamples;
+            const dominanceCoverageRatio = totalMimoSamples > 0 ? (samplesWith2Pilots / totalMimoSamples) : null;
+            const deltaCoverageRatio = validDenominator > 0 ? (samplesWith2Pilots / validDenominator) : null;
+            const deltaLowConfidence = !Number.isFinite(deltaCoverageRatio) || deltaCoverageRatio < 0.30;
+            const validBest = dominantRatAtEnd === 'LTE' ? best.filter(v => Number.isFinite(v.rscp)) : best.filter(v => Number.isFinite(v.rscp) && Number.isFinite(v.ecno));
+            const validBestCount = Number.isFinite(snap.validBestCount) ? snap.validBestCount : validBest.length;
+            let computedStrongBadCount = dominantRatAtEnd === 'LTE' ? 0 : validBest.filter(v => v.rscp > -85 && v.ecno < -14).length;
+            const strongBadCount = Number.isFinite(snap.strongBadCount) ? snap.strongBadCount : computedStrongBadCount;
+            const bestPsc = modeNumber(best.map(v => v.sc));
+            const rscpValidValues = validBest.map(v => v.rscp);
+            const ecnoValidValues = validBest.map(v => v.ecno);
+            const levelFromScore = (v) => v >= 60 ? 'High' : (v >= 35 ? 'Moderate' : 'Low');
+            const strongRscpCount = validBest.filter(v => v.rscp > -85).length;
+            const ratioStrongShare = validBestCount > 0 ? (strongRscpCount / validBestCount) : null;
+            const ratioBad = strongRscpCount > 0 ? (strongBadCount / strongRscpCount) : null;
+            const strongRscpShare = ratioStrongShare;
+            const coverageBucket = (() => {
+                if (!Number.isFinite(snap.rscpMedian)) return 'unknown';
+                if (snap.rscpMedian > -85) return 'strong';
+                if (snap.rscpMedian > -95) return 'fair';
+                return 'weak';
+            })();
+            const overlapCoverageLabel = coverageBucket === 'strong'
+                ? 'under strong coverage'
+                : (coverageBucket === 'fair' ? 'under fair coverage' : 'under weak coverage');
+            const dominanceAvailable = samplesWith2Pilots > 0;
+            const hasStrongDominanceEvidence = dominanceAvailable && !deltaLowConfidence;
+            const deltaMedian = dominanceAvailable ? deltaMedianRaw : null;
+            const deltaRatio = dominanceAvailable ? deltaRatioRaw : null;
+            const deltaStd = dominanceAvailable ? deltaStdRaw : null;
+            const weakDominanceSignature = hasStrongDominanceEvidence
+                && Number.isFinite(deltaMedian)
+                && Number.isFinite(deltaRatio)
+                && deltaMedian < 3
+                && deltaRatio > 0.30;
+            const strongDominanceGuard = hasStrongDominanceEvidence
+                && Number.isFinite(deltaMedian)
+                && Number.isFinite(deltaRatio)
+                && deltaMedian >= 6
+                && deltaRatio <= 0.20;
+            const cellmeasAgreement = (dominanceAvailable && cellmeasDominanceAvailable && Number.isFinite(cellmeasDeltaMedian) && Number.isFinite(deltaMedian))
+                ? ((Math.abs(cellmeasDeltaMedian - deltaMedian) <= 1.5
+                    && Number.isFinite(cellmeasLt3dbRatio) && Number.isFinite(deltaRatio)
+                    && Math.abs(cellmeasLt3dbRatio - deltaRatio) <= 0.20) ? 'agree' : 'disagree')
+                : 'n/a';
+            let dominanceScore = 0;
+            if (hasStrongDominanceEvidence) {
+                if (deltaMedian !== null && deltaMedian < 2) dominanceScore += 30;
+                if (Number.isFinite(deltaRatio) && deltaRatio > 0.70) dominanceScore += 30;
+                if (Number.isFinite(deltaStd) && deltaStd > 2) dominanceScore += 10;
+            }
+            if (dominanceAvailable && dominantRatAtEnd === 'UMTS') {
+                if (observedPilotMax >= 3) dominanceScore += 10;
+                if (observedPilotMean >= 2.5) dominanceScore += 5;
+            }
+            if (pscSwitchCount > 3) dominanceScore += 15;
+            dominanceScore = Math.max(0, Math.min(100, dominanceScore));
+            if (!dominanceAvailable) {
+                dominanceScore = null;
+            }
+            if (strongDominanceGuard && Number.isFinite(dominanceScore)) {
+                // Strong dominance means overlap is unlikely even with quality issues.
+                dominanceScore = Math.min(dominanceScore, 20);
+            }
+
+            let interferenceScore = 0;
+            if (Number.isFinite(snap.blerMax) && snap.blerMax >= 80) interferenceScore += 40;
+            if (Number.isFinite(snap.ecnoMedian) && snap.ecnoMedian <= -12) interferenceScore += 30;
+            if (Number.isFinite(snap.rscpMedian) && snap.rscpMedian >= -90) interferenceScore += 20;
+            if (Number.isFinite(snap.txP90) && snap.txP90 <= 18) interferenceScore += 10;
+            interferenceScore = Math.max(0, Math.min(100, interferenceScore));
+
+            const dominanceLevel = dominanceAvailable ? levelFromScore(dominanceScore) : 'N/A';
+            const interferenceLevel = levelFromScore(interferenceScore);
+            let finalLabel = 'Low overlap risk';
+            let pollutionScore = dominanceAvailable ? dominanceScore : interferenceScore;
+            let pollutionLevel = dominanceAvailable ? dominanceLevel : interferenceLevel;
+            const explicitDlInterferenceSignature = Number.isFinite(snap.blerMax) && snap.blerMax >= 80 &&
+                Number.isFinite(snap.rscpMedian) && snap.rscpMedian >= -90 &&
+                Number.isFinite(snap.txP90) && snap.txP90 <= 18;
+            if (interferenceScore >= 60 && strongDominanceGuard) {
+                finalLabel = 'DL Interference (strong dominance, overlap unlikely)';
+                pollutionScore = Number.isFinite(dominanceScore) ? dominanceScore : 20;
+                pollutionLevel = 'Low';
+            } else if (interferenceScore >= 60 && ((Number.isFinite(strongRscpShare) && strongRscpShare >= 0.30) || explicitDlInterferenceSignature)) {
+                finalLabel = hasStrongDominanceEvidence ? 'Pilot Pollution / DL Interference' : 'DL Interference (dominance evidence unavailable)';
+                pollutionScore = interferenceScore;
+                pollutionLevel = interferenceLevel;
+            } else if (weakDominanceSignature && dominanceScore >= 60 && Number.isFinite(strongRscpShare) && strongRscpShare < 0.30) {
+                finalLabel = `High overlap / poor dominance ${overlapCoverageLabel}`;
+                pollutionScore = dominanceScore;
+                pollutionLevel = dominanceLevel;
+            } else if (weakDominanceSignature && dominanceScore >= 35) {
+                finalLabel = 'Overlap risk';
+                pollutionScore = dominanceScore;
+                pollutionLevel = dominanceLevel;
+            } else if (strongDominanceGuard) {
+                finalLabel = 'Low overlap risk (strong dominance)';
+                pollutionScore = Number.isFinite(dominanceScore) ? dominanceScore : 20;
+                pollutionLevel = 'Low';
+            } else if (!hasStrongDominanceEvidence && interferenceScore < 60) {
+                finalLabel = 'Dominance unavailable / low interference risk';
+                pollutionScore = interferenceScore;
+                pollutionLevel = interferenceLevel;
+            }
+            snap.pollutionScore = pollutionScore;
+            snap.pollutionLevel = dominanceAvailable ? pollutionLevel : 'N/A';
+            const countBelow3 = Number.isFinite(snap.pilotDominanceLowCount) ? snap.pilotDominanceLowCount : 0;
+            const deltaMedianText = samplesWith2Pilots > 0 && deltaMedian !== null ? `${deltaMedian.toFixed(2)} dB` : 'n/a';
+            const deltaStdText = samplesWith2Pilots > 0 && Number.isFinite(deltaStd) ? `${deltaStd.toFixed(2)} dB` : 'n/a';
+            const deltaRatioPct = (samplesWith2Pilots > 0 && Number.isFinite(deltaRatio)) ? (deltaRatio * 100).toFixed(0) : 'n/a';
+            const deltaRatioDen = samplesWith2Pilots > 0 ? `${countBelow3}/${samplesWith2Pilots}` : '0/0';
+            const cellDeltaMedText = cellmeasDominanceAvailable && Number.isFinite(cellmeasDeltaMedian) ? `${cellmeasDeltaMedian.toFixed(2)} dB` : 'n/a';
+            const cellDeltaRatioText = cellmeasDominanceAvailable && Number.isFinite(cellmeasLt3dbRatio) ? `${(cellmeasLt3dbRatio * 100).toFixed(0)}%` : 'n/a';
+            const cellDeltaCoverageText = Number.isFinite(cellmeasCoverageRatio) ? `${(cellmeasCoverageRatio * 100).toFixed(0)}%` : 'n/a';
+            const deltaCoverageText = Number.isFinite(dominanceCoverageRatio) ? `${(dominanceCoverageRatio * 100).toFixed(0)}%` : 'n/a';
+            const strongSharePct = validBestCount > 0 && Number.isFinite(ratioStrongShare) ? (ratioStrongShare * 100).toFixed(0) : 'n/a';
+            const strongBadPct = strongRscpCount > 0 && Number.isFinite(ratioBad) ? (ratioBad * 100).toFixed(0) : 'n/a';
+            const detailsText = [
+                `Window: ${Math.max(1, windowSeconds)}s before end. MIMOMEAS samples: ${totalMimoSamples}.`,
+                `Final classification: ${finalLabel} (${pollutionLevel}, ${pollutionScore}/100).`,
+                `Overlap / dominance risk: ${hasStrongDominanceEvidence ? `${dominanceLevel} (${dominanceScore}/100)` : `N/A (0/${totalMimoSamples} >=2-pilot)`}.`,
+                `Interference-under-strong-signal risk: ${interferenceLevel} (${interferenceScore}/100).`,
+                `Overall label: ${finalLabel}.`,
+                `Dominance gap (best-2nd): ${deltaMedianText}.`,
+                `• <3 dB ratio: ${deltaRatioPct}${deltaRatioPct === 'n/a' ? '' : '%'} of samples (${deltaRatioDen})`,
+                `• Coverage ratio (dominance measurable): ${deltaCoverageText} (${samplesWith2Pilots}/${totalMimoSamples})`,
+                `• ΔRSCP std: ${deltaStdText}`,
+                `CELLMEAS corroboration (Subtype A only): ${cellmeasDominanceAvailable ? `Dominance gap median ${cellDeltaMedText}, <3 dB ratio ${cellDeltaRatioText}, coverage ratio ${cellDeltaCoverageText}, agreement=${cellmeasAgreement}` : `N/A (${cellmeasUnavailableReason})`}.`,
+                ...(dominanceSourceLine ? [dominanceSourceLine] : []),
+                `• CELLMEAS subtype-A rows: ${cellmeasSubtypeARows}/${cellmeasUmtsRows}, subtype-B-only rows: ${cellmeasSubtypeBOnlyRows}/${cellmeasUmtsRows}, dominance rows: ${cellmeasDeltas.length}/${cellmeasUmtsRows}`,
+                'Strong RSCP + bad EcNo (best server):',
+                '• Thresholds: RSCP > -85 dBm AND EcNo < -14 dB',
+                `• Strong RSCP share computed on ${strongRscpCount}/${validBestCount} best-server samples (RSCP > -85): ${strongSharePct}${strongSharePct === 'n/a' ? '' : '%'}`,
+                `• Strong RSCP + bad EcNo computed on ${strongBadCount}/${strongRscpCount} strong samples (EcNo < -14): ${strongBadPct}${strongBadPct === 'n/a' ? '' : '%'}`,
+                `• Best-server denominator reference: ${validBestCount}/${totalMimoSamples}`,
+                `• RSCP range: ${rscpValidValues.length ? `${Math.min(...rscpValidValues).toFixed(2)} .. ${Math.max(...rscpValidValues).toFixed(2)}` : 'n/a'} dBm`,
+                `• EcNo range: ${ecnoValidValues.length ? `${Math.min(...ecnoValidValues).toFixed(2)} .. ${Math.max(...ecnoValidValues).toFixed(2)}` : 'n/a'} dB`,
+                'Serving stability:',
+                `• Best PSC switches: ${pscSwitchCount}${Number.isFinite(bestPsc) ? ` (best PSC: ${bestPsc})` : ''}`,
+                'Active-set proxy (<=3 dB):',
+                '• Definition: pilots within 3 dB of best RSCP per timestamp',
+                `• Mean/max: ${observedPilotMean.toFixed(2)} / ${observedPilotMax}`
+            ];
+            if (!dominanceAvailable) {
+                detailsText.push('Dominance evidence unavailable: no timestamps with >=2 pilots were found in this window.');
+            } else if (deltaLowConfidence) {
+                detailsText.push(`Dominance evidence is low-confidence: only ${samplesWith2Pilots}/${totalMimoSamples} timestamps have >=2 pilots.`);
+            }
+            if (strongDominanceGuard) {
+                detailsText.push('Dominance guard applied: strong best-server dominance (high ΔRSCP, low <3 dB ratio) suppresses pilot-overlap classification.');
+            }
+            if (deltaLowConfidence) {
+                detailsText.push(
+                    `ΔRSCP could only be calculated at ${samplesWith2Pilots} time points because nearby cells were not consistently detectable. As a result, the ΔRSCP analysis is based on limited data and should be interpreted with caution.`
+                );
+            }
+            snap.pilotPollution = {
+                riskLevel: dominanceAvailable ? pollutionLevel : 'N/A',
+                score: pollutionScore,
+                pollutionScore,
+                pollutionLevel: dominanceAvailable ? pollutionLevel : 'N/A',
+                dominanceScore,
+                dominanceLevel,
+                dominanceAvailable,
+                strongDominanceGuard,
+                weakDominanceSignature,
+                dominantRatAtEnd,
+                interferenceScore,
+                interferenceLevel,
+                strongRscpShare,
+                finalLabel,
+                cellmeasDominance: {
+                    available: cellmeasDominanceAvailable,
+                    medianDb: cellmeasDeltaMedian,
+                    lt3dbRatio: cellmeasLt3dbRatio,
+                    coverageRatio: cellmeasCoverageRatio,
+                    coverageRatioSubtypeA: cellmeasSubtypeACoverageRatio,
+                    confidenceLow: cellmeasLowCoverage,
+                    agreementWithMimo: cellmeasAgreement,
+                    samplesWith2Pilots: cellmeasDeltas.length,
+                    totalSubtypeARows: cellmeasSubtypeARows,
+                    totalUmtsRows: cellmeasUmtsRows,
+                    subtypeBOnlyRows: cellmeasSubtypeBOnlyRows,
+                    unavailableReason: cellmeasDominanceAvailable ? null : cellmeasUnavailableReason
+                },
+                deltaStats: {
+                    medianDb: deltaMedian,
+                    stdDb: deltaStd,
+                    lt3dbRatio: deltaRatio,
+                    samplesWith2Pilots,
+                    totalMimoSamples,
+                    coverageRatio: dominanceCoverageRatio,
+                    validDenominator,
+                    validCoverageRatio: deltaCoverageRatio,
+                    computedCount: samplesWith2Pilots,
+                    confidenceLow: deltaLowConfidence,
+                    deltaUnavailableReason: dominanceAvailable ? null : 'no >=2 pilot timestamps',
+                    deltas: dominantRatAtEnd === 'LTE' ? lteDominanceDeltas.slice() : dominanceDeltas.slice()
+                },
+                strongRscpBadEcno: {
+                    ratio: ratioBad,
+                    count: strongBadCount,
+                    totalAboveRscpThresh: strongRscpCount,
+                    ecnoMinDb: ecnoValidValues.length ? Math.min(...ecnoValidValues) : null,
+                    ecnoMaxDb: ecnoValidValues.length ? Math.max(...ecnoValidValues) : null
+                },
+                bestPscSwitches: pscSwitchCount,
+                bestPsc,
+                activeSet: {
+                    definition: 'count of pilots within 3 dB of best RSCP per timestamp',
+                    mean: observedPilotMean,
+                    max: observedPilotMax
+                },
+                detailsText,
+                details: {
+                    deltaMedian,
+                    deltaRatio,
+                    deltaStd,
+                    deltaConfidenceLow: deltaLowConfidence,
+                    badEcnoStrongRscpRatio: ratioBad,
+                    pscSwitchCount,
+                    activeSetMean: observedPilotMean,
+                    activeSetMax: observedPilotMax
+                }
+            };
+            snap.pilotPollutionDetected = pollutionScore >= 35;
+            snap.pilotPollutionEvidence = [
+                `Final=${finalLabel} (${pollutionLevel}, ${pollutionScore}/100), dominance=${dominanceScore}/100, interference=${interferenceScore}/100`,
+                `Dominance denominator (>=2 pilots): ${samplesWith2Pilots}/${totalMimoSamples}`,
+                `Strong RSCP share=${Number.isFinite(ratioStrongShare) ? `${(ratioStrongShare * 100).toFixed(0)}%` : 'n/a'} (${strongRscpCount}/${validBestCount})`,
+                (deltaLowConfidence ? 'ΔRSCP confidence is low (<30% of samples have >=2 pilots), excluded from primary root-cause scoring.' : 'ΔRSCP confidence is acceptable for scoring.'),
+                (strongDominanceGuard ? 'Strong-dominance guard active: overlap score capped/suppressed for this window.' : 'Strong-dominance guard inactive.'),
+                `ΔRSCP median=${deltaMedian !== null ? deltaMedian.toFixed(2) : 'n/a'} dB, ΔRSCP<3dB ratio=${Number.isFinite(deltaRatio) ? `${(deltaRatio * 100).toFixed(0)}%` : 'n/a'}, ΔRSCP std=${Number.isFinite(deltaStd) ? deltaStd.toFixed(2) : 'n/a'} dB`,
+                `CELLMEAS corroboration=${cellmeasDominanceAvailable ? `available (median=${cellDeltaMedText}, <3dB=${cellDeltaRatioText}, coverage=${cellDeltaCoverageText}, agreement=${cellmeasAgreement})` : `unavailable (${cellmeasUnavailableReason})`}`,
+                `Strong-RSCP with bad EcNo ratio=${Number.isFinite(ratioBad) ? `${(ratioBad * 100).toFixed(0)}%` : 'n/a'} (${strongBadCount}/${strongRscpCount})`,
+                `Best PSC switches=${pscSwitchCount}, activeSet mean=${observedPilotMean.toFixed(2)}, max=${observedPilotMax}`
+            ];
+
+            const txFrom = lowerBound(dev.txpcRows, fromTs);
+            const txTo = upperBound(dev.txpcRows, endTs);
+            if (txTo > txFrom) {
+                const txVals = dev.txpcRows.slice(txFrom, txTo).map(v => v.tx).filter(v => Number.isFinite(v));
+                snap.txSampleCountValid = txVals.length;
+                if (txVals.length) {
+                    snap.txP90 = percentile(txVals, 90);
+                    snap.txMax = Math.max(...txVals);
+                    snap.txLast = txVals[txVals.length - 1];
+                    const txRows = dev.txpcRows.slice(txFrom, txTo).filter(v => Number.isFinite(v.tx));
+                    snap.lastTxTs = txRows.length ? txRows[txRows.length - 1].ts : null;
+                }
+            }
+            const rFrom = lowerBound(dev.rlcRows, fromTs);
+            const rTo = upperBound(dev.rlcRows, endTs);
+            if (rTo > rFrom) {
+                const rows = dev.rlcRows.slice(rFrom, rTo);
+                snap.blerRowCount = rows.length;
+                snap.rlcBlerSamplesCount = rows.length;
+                snap.blerMax = rows.reduce((m, r) => (r.blerMax > m ? r.blerMax : m), -Infinity);
+                snap.blerMean = rows.reduce((s, r) => s + r.blerMean, 0) / rows.length;
+            }
+            snap.blerEvidence = Number.isFinite(snap.rlcBlerSamplesCount) && snap.rlcBlerSamplesCount >= snap.blerEvidenceMinSamples;
+            snap.mimoSampleCount = best.length;
+            snap.sampleCount = best.length;
+            if (best.length >= 2) {
+                const first = best[0];
+                const last = best[best.length - 1];
+                snap.rscpTrendDelta = last.rscp - first.rscp;
+                snap.ecnoTrendDelta = last.ecno - first.ecno;
+                snap.trendDurationSec = Math.max(0.001, (last.ts - first.ts) / 1000);
+            }
+            snap.trendMessage = best.length === 0 ? 'No MIMOMEAS samples in last 10s.' : (best.length < 2 ? `Only ${best.length} MIMOMEAS samples in last 10s — trend not computed.` : `Trend computed from ${best.length} MIMOMEAS samples in last 10s.`);
+            return snap;
+        };
+
+        const computeP90 = (values) => {
+            if (!Array.isArray(values) || values.length === 0) return null;
+            const sorted = values.slice().sort((a, b) => a - b);
+            const idx = Math.max(0, Math.ceil(0.9 * sorted.length) - 1);
+            return sorted[idx];
+        };
+
+        const makeEventBrief = (e) => e ? ({
+            tsIso: Number.isFinite(e.ts) ? new Date(e.ts).toISOString() : null,
+            header: e.header,
+            raw: e.raw
+        }) : null;
+
+        const buildSetupFailureContextBundle = (session, radioPreEndSec = 20, signalingAroundEndSec = 20) => {
+            if (!session || !Number.isFinite(session.endTsReal)) return null;
+            const endTs = session.endTsReal;
+            const radioFromTs = endTs - Math.max(1, radioPreEndSec) * 1000;
+            const signalingFromTs = endTs - Math.max(1, signalingAroundEndSec) * 1000;
+            const signalingToTs = endTs + Math.max(1, signalingAroundEndSec) * 1000;
+
+            const dev = getDeviceStore(session.deviceId || '');
+            const mimoFrom = lowerBound(dev.mimoRows, radioFromTs);
+            const mimoTo = upperBound(dev.mimoRows, endTs);
+            const bestServerSeries = [];
+            for (let i = mimoFrom; i < mimoTo; i++) {
+                const row = dev.mimoRows[i];
+                const byPsc = new Map();
+                (row.samples || []).forEach(s => {
+                    const key = String(s.psc);
+                    const cur = byPsc.get(key) || { psc: s.psc, rscpSum: 0, ecnoSum: 0, count: 0, cellId: s.cellId, uarfcn: s.uarfcn };
+                    cur.rscpSum += s.rscp;
+                    cur.ecnoSum += s.ecno;
+                    cur.count += 1;
+                    byPsc.set(key, cur);
+                });
+                const blocks = [];
+                byPsc.forEach(v => {
+                    if (!Number.isFinite(v.count) || v.count <= 0) return;
+                    blocks.push({
+                        ts: row.ts,
+                        psc: v.psc,
+                        rscp: v.rscpSum / v.count,
+                        ecno: v.ecnoSum / v.count,
+                        cellId: v.cellId,
+                        uarfcn: v.uarfcn
+                    });
+                });
+                const best = getBestServerFromMimo(blocks);
+                if (best) bestServerSeries.push(best);
+            }
+
+            const rscpValues = bestServerSeries.map(s => s.rscp).filter(Number.isFinite);
+            const ecnoValues = bestServerSeries.map(s => s.ecno).filter(Number.isFinite);
+
+            const txFrom = lowerBound(dev.txpcRows, radioFromTs);
+            const txTo = upperBound(dev.txpcRows, endTs);
+            const txRows = dev.txpcRows.slice(txFrom, txTo).filter(v => Number.isFinite(v.tx));
+            const txValues = txRows.map(v => v.tx);
+
+            const rFrom = lowerBound(dev.rlcRows, radioFromTs);
+            const rTo = upperBound(dev.rlcRows, endTs);
+            const blerRows = dev.rlcRows.slice(rFrom, rTo);
+            const blerMax = blerRows.length ? blerRows.reduce((m, r) => (r.blerMax > m ? r.blerMax : m), -Infinity) : null;
+            const blerTrend = blerRows.length >= 2 && Number.isFinite(blerRows[0].blerMean) && Number.isFinite(blerRows[blerRows.length - 1].blerMean)
+                ? (blerRows[blerRows.length - 1].blerMean - blerRows[0].blerMean)
+                : null;
+
+            const deviceEvents = (eventsByDevice.get(String(session.deviceId || '')) || []).slice().sort((a, b) => a.ts - b.ts);
+            const signalingWindowEvents = deviceEvents.filter(e => e.ts >= signalingFromTs && e.ts <= signalingToTs);
+            const last20EventsBeforeEnd = deviceEvents.filter(e => e.ts >= signalingFromTs && e.ts <= endTs).slice(-20);
+            const first10EventsAfterStart = Number.isFinite(session.startTs)
+                ? deviceEvents.filter(e => e.ts >= session.startTs && e.ts <= signalingToTs).slice(0, 10)
+                : [];
+            const closestRrcOrHoBeforeEnd = deviceEvents
+                .filter(e => e.ts <= endTs && (String(e.header || '').toUpperCase() === 'RRCSM' || String(e.header || '').toUpperCase() === 'SHO'))
+                .slice(-1)[0] || null;
+            const closestReleaseReject = signalingWindowEvents
+                .filter(e => /reject|release|fail|cause/i.test(String(e.raw || '')) || /CAD|CAF|CARE/i.test(String(e.header || '')))
+                .map(e => ({ ...e, dist: Math.abs(endTs - e.ts) }))
+                .sort((a, b) => a.dist - b.dist)[0] || null;
+
+            return {
+                type: 'SETUP_FAILURE_CONTEXT_BUNDLE',
+                windows: {
+                    radioPreEndSec,
+                    signalingAroundEndSec,
+                    radioWindowStartIso: new Date(radioFromTs).toISOString(),
+                    radioWindowEndIso: new Date(endTs).toISOString(),
+                    signalingWindowStartIso: new Date(signalingFromTs).toISOString(),
+                    signalingWindowEndIso: new Date(signalingToTs).toISOString()
+                },
+                radioContext: {
+                    mimoSampleCount: bestServerSeries.length,
+                    rscpMin: rscpValues.length ? Math.min(...rscpValues) : null,
+                    rscpMax: rscpValues.length ? Math.max(...rscpValues) : null,
+                    rscpMedian: median(rscpValues),
+                    ecnoMin: ecnoValues.length ? Math.min(...ecnoValues) : null,
+                    ecnoMax: ecnoValues.length ? Math.max(...ecnoValues) : null,
+                    ecnoMedian: median(ecnoValues),
+                    txLast: txValues.length ? txValues[txValues.length - 1] : null,
+                    txP90: computeP90(txValues),
+                    txMax: txValues.length ? Math.max(...txValues) : null,
+                    blerMax,
+                    blerTrend,
+                    bestServerSeries: bestServerSeries.map(s => ({
+                        tsIso: Number.isFinite(s.ts) ? new Date(s.ts).toISOString() : null,
+                        psc: s.psc,
+                        uarfcn: s.uarfcn,
+                        rscp: s.rscp,
+                        ecno: s.ecno
+                    })),
+                    txSeries: txRows.map(r => ({ tsIso: Number.isFinite(r.ts) ? new Date(r.ts).toISOString() : null, tx: r.tx })),
+                    blerSeries: blerRows.map(r => ({ tsIso: Number.isFinite(r.ts) ? new Date(r.ts).toISOString() : null, blerMax: r.blerMax, blerMean: r.blerMean }))
+                },
+                signalingContext: {
+                    totalEventsInWindow: signalingWindowEvents.length,
+                    last20EventsBeforeEnd: last20EventsBeforeEnd.map(makeEventBrief),
+                    first10EventsAfterStart: first10EventsAfterStart.map(makeEventBrief),
+                    closestRrcOrHoBeforeEnd: makeEventBrief(closestRrcOrHoBeforeEnd),
+                    closestReleaseRejectCause: makeEventBrief(closestReleaseReject)
+                },
+                callControlContext: {
+                    deviceId: session.deviceId || null,
+                    callId: session.callId || null,
+                    connectedEver: Number.isFinite(session.connectedTs),
+                    cAA: Number.isFinite(session.startTs) ? new Date(session.startTs).toISOString() : null,
+                    cACConnected: Number.isFinite(session.connectedTs) ? new Date(session.connectedTs).toISOString() : null,
+                    cAD: Number.isFinite(session.endTsCad) ? new Date(session.endTsCad).toISOString() : null,
+                    cAF: Number.isFinite(session.endTsCaf) ? new Date(session.endTsCaf).toISOString() : null,
+                    cARE: Number.isFinite(session.endTsCare) ? new Date(session.endTsCare).toISOString() : null,
+                    endTsReal: Number.isFinite(session.endTsReal) ? new Date(session.endTsReal).toISOString() : null,
+                    cadStatus: session.cadStatus ?? null,
+                    cadCause: session.cadCause ?? null,
+                    cafReason: session.cafReason ?? null
+                }
+            };
+        };
+
+        const isHealthyRadioSnapshot = (snapshot) => (
+            Number.isFinite(snapshot?.rscpMedian) && snapshot.rscpMedian > -85 &&
+            Number.isFinite(snapshot?.ecnoMedian) && snapshot.ecnoMedian > -10 &&
+            Number.isFinite(snapshot?.txP90) && snapshot.txP90 < 20 &&
+            snapshot?.blerEvidence === true &&
+            Number.isFinite(snapshot?.blerMax) && snapshot.blerMax < 5
+        );
+
+        const decodeCadCauseLabel = (cause) => {
+            const map = {
+                16: 'Normal call clearing',
+                17: 'User busy',
+                18: 'No user responding',
+                19: 'No answer from user',
+                21: 'Call rejected',
+                27: 'Destination out of order',
+                34: 'No circuit/channel available',
+                41: 'Temporary failure',
+                42: 'Switching equipment congestion',
+                47: 'Resource unavailable',
+                102: 'Setup timeout (timer expiry)'
+            };
+            return map[cause] || 'Unknown cause';
+        };
+
+        const buildRadioEvaluation = (snapshot, category, domain, session) => {
+            const rscp = snapshot?.rscpMedian;
+            const ecno = snapshot?.ecnoMedian;
+            const tx = snapshot?.txP90;
+            const bler = snapshot?.blerMax;
+            const blerEvidence = snapshot?.blerEvidence === true;
+            const rlcCount = Number.isFinite(snapshot?.rlcBlerSamplesCount) ? snapshot.rlcBlerSamplesCount : 0;
+            const parts = [];
+
+            if (Number.isFinite(rscp)) {
+                parts.push(rscp >= -90
+                    ? `Coverage is acceptable (RSCP median ${rscp.toFixed(1)} dBm).`
+                    : `Coverage is weak (RSCP median ${rscp.toFixed(1)} dBm).`);
+            } else {
+                parts.push('Coverage is not assessable (RSCP median n/a).');
+            }
+
+            if (Number.isFinite(tx)) {
+                if (tx <= 18) parts.push(`Uplink margin appears strong (UE Tx p90 ${tx.toFixed(1)} dBm), arguing against UL limitation.`);
+                else parts.push(`UE Tx is elevated (p90 ${tx.toFixed(1)} dBm), suggesting uplink stress or poor UL margin.`);
+            } else {
+                parts.push('Uplink margin is not assessable (UE Tx p90 n/a).');
+            }
+
+            if (Number.isFinite(ecno)) {
+                if (ecno <= -14) parts.push(`Downlink quality is severely degraded (EcNo median ${ecno.toFixed(1)} dB), consistent with interference/overlap or weak dominance.`);
+                else if (ecno <= -12) parts.push(`Downlink quality is borderline (EcNo median ${ecno.toFixed(1)} dB).`);
+                else parts.push(`Downlink quality is acceptable (EcNo median ${ecno.toFixed(1)} dB).`);
+            } else {
+                parts.push('Downlink quality is not assessable (EcNo median n/a).');
+            }
+
+            if (blerEvidence) {
+                if (Number.isFinite(bler) && bler >= 80) parts.push(`DL decoding collapses (BLER max ${bler.toFixed(1)}%), indicating DL decode impairment.`);
+                else if (Number.isFinite(bler)) parts.push(`BLER is not elevated (max ${bler.toFixed(1)}%).`);
+            } else {
+                parts.push('BLER is not informative during setup (insufficient RLC BLER samples); do not use BLER to judge DL health.');
+            }
+
+            const isTimeout = category === 'SETUP_TIMEOUT' || domain === 'Signaling/Timeout' || Number(session?.cadCause) === 102;
+            if (isTimeout && Number.isFinite(ecno) && ecno <= -14) {
+                parts.push('Radio quality (very low EcNo) may contribute to retransmissions/latency, which can drive timeout even when BLER is not measurable.');
+            }
+            const isDlSignature = blerEvidence &&
+                Number.isFinite(bler) && bler >= 80 &&
+                Number.isFinite(rscp) && rscp >= -90 &&
+                (!Number.isFinite(tx) || tx <= 18);
+            if (isDlSignature) {
+                parts.push('This matches a DL decode-impairment signature (interference/noise-rise/control-channel decode issues).');
+            }
+            if (Number.isFinite(rlcCount) && rlcCount > 0 && rlcCount < 3) {
+                parts.push(`RLC BLER sample count is low (${rlcCount}), so BLER confidence is limited.`);
+            }
+            return parts.join(' ');
+        };
+
+        const decodeCafReasonLabel = (reason) => {
+            const map = {
+                0: 'Unknown/Not provided',
+                1: 'User action / call aborted (tool-specific)',
+                2: 'Setup failed / call attempt aborted (network or radio procedure failed)',
+                3: 'Call rejected (tool-specific)'
+            };
+            return map[reason] || 'Unknown/tool-specific reason';
+        };
+
+        const buildSetupFailureDeepAnalysis = (session, snapshot, contextBundle, classification) => {
+            if (!session || session.resultType !== 'CALL_SETUP_FAILURE') return null;
+            const radioHealthy = isHealthyRadioSnapshot(snapshot || {});
+            const sc = contextBundle?.signalingContext || {};
+            const allEvents = []
+                .concat(Array.isArray(sc.first10EventsAfterStart) ? sc.first10EventsAfterStart : [])
+                .concat(Array.isArray(sc.last20EventsBeforeEnd) ? sc.last20EventsBeforeEnd : []);
+            const hasDirectTransfer = allEvents.some(e => /DIRECT_TRANSFER/i.test(String(e?.raw || '')));
+            const releaseNearEnd = /RELEASE|REJECT|FAIL/i.test(String(sc?.closestReleaseRejectCause?.raw || ''));
+            const hasMobilityNearEnd = /SHO|HO|HANDOVER/i.test(String(sc?.closestRrcOrHoBeforeEnd?.raw || ''));
+            const hasCongestionHints = allEvents.some(e => /(NO[_\s-]?RESOURCE|ADMISSION|CONGEST|POWER LIMIT|CODE LIMIT|CE FULL|CHANNEL ALLOCATION FAILURE|NO RADIO RESOURCE)/i.test(String(e?.raw || '')));
+            const noConnection = !Number.isFinite(session?.connectedTs);
+            const dlSignature = (snapshot?.blerEvidence === true || (Number.isFinite(snapshot?.blerMax) && snapshot.blerMax >= 95)) &&
+                Number.isFinite(snapshot?.blerMax) && snapshot.blerMax >= 80 &&
+                Number.isFinite(snapshot?.txP90) && snapshot.txP90 <= 18 &&
+                Number.isFinite(snapshot?.rscpMedian) && snapshot.rscpMedian >= -90;
+            const terminalMarker = Number.isFinite(session?.endTsCaf)
+                ? 'CAF'
+                : (Number.isFinite(session?.endTsCad) ? 'CAD' : (Number.isFinite(session?.endTsCare) ? 'CARE' : 'UNKNOWN'));
+            const cafReasonLabel = decodeCafReasonLabel(session?.cafReason);
+            const cadCauseLabel = decodeCadCauseLabel(session?.cadCause);
+
+            let interpretation = 'Setup failure likely originated from mixed radio/signaling factors.';
+            const cat = String(classification?.category || 'SETUP_FAIL_UNKNOWN');
+            if (cat === 'SETUP_FAIL_SIGNALING_OR_CORE' || (radioHealthy && releaseNearEnd && noConnection)) interpretation = 'Strong and stable radio conditions with immediate release indicate signaling/core-layer rejection.';
+            else if (cat === 'SETUP_FAIL_UL_COVERAGE') interpretation = 'Setup failed due to uplink margin limitation under weak/unstable radio conditions.';
+            else if (cat === 'SETUP_FAIL_DL_INTERFERENCE') interpretation = 'Setup failed under downlink quality/interference degradation.';
+            else if (cat === 'SETUP_FAIL_MOBILITY') interpretation = 'Setup failed around mobility transition instability.';
+            else if (cat === 'SETUP_FAIL_CONGESTION') interpretation = 'Setup failed with admission/resource congestion indicators.';
+            else if (cat === 'SETUP_TIMEOUT') interpretation = 'Setup timer expired before connection could complete.';
+
+            let breakdown = {
+                radioHealthy: radioHealthy ? 40 : 0,
+                immediateRelease: releaseNearEnd ? 25 : 0,
+                noConnection: noConnection ? 15 : 0,
+                noMobility: !hasMobilityNearEnd ? 10 : 0,
+                noCongestion: !hasCongestionHints ? 10 : 0
+            };
+            let score = breakdown.radioHealthy + breakdown.immediateRelease + breakdown.noConnection + breakdown.noMobility + breakdown.noCongestion;
+            if (cat === 'SETUP_FAIL_DL_INTERFERENCE') {
+                breakdown = {
+                    blerVeryHigh: ((snapshot?.blerEvidence === true || (Number.isFinite(snapshot?.blerMax) && snapshot.blerMax >= 95)) && Number.isFinite(snapshot?.blerMax) && snapshot.blerMax >= 80) ? 50 : 0,
+                    ulNotLimited: (Number.isFinite(snapshot?.txP90) && snapshot.txP90 <= 18) ? 20 : 0,
+                    coverageAcceptable: (Number.isFinite(snapshot?.rscpMedian) && snapshot.rscpMedian >= -90) ? 15 : 0,
+                    ecnoDegraded: (Number.isFinite(snapshot?.ecnoMedian) && snapshot.ecnoMedian <= -12) ? 15 : 0
+                };
+                score = Object.values(breakdown).reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+            }
+
+            return {
+                radioAssessment: {
+                    radioHealthy,
+                    metrics: {
+                        rscpMin: snapshot?.rscpMin ?? null,
+                        rscpMedian: snapshot?.rscpMedian ?? null,
+                        rscpMax: snapshot?.rscpLast ?? snapshot?.rscpMax ?? null,
+                        ecnoMin: snapshot?.ecnoMin ?? null,
+                        ecnoMedian: snapshot?.ecnoMedian ?? null,
+                        ecnoMax: snapshot?.ecnoLast ?? snapshot?.ecnoMax ?? null,
+                        txP90: snapshot?.txP90 ?? null,
+                        blerMax: snapshot?.blerMax ?? null,
+                        blerEvidence: snapshot?.blerEvidence === true,
+                        rlcBlerSamplesCount: Number.isFinite(snapshot?.rlcBlerSamplesCount) ? snapshot.rlcBlerSamplesCount : 0,
+                        mimoSampleCount: snapshot?.mimoSampleCount ?? 0
+                    },
+                    evaluation: buildRadioEvaluation(snapshot, cat, classification?.domain, session)
+                },
+                signalingAssessment: {
+                    rrcEstablished: hasDirectTransfer,
+                    directTransferObserved: hasDirectTransfer,
+                    explicitL3ReleaseRejectNearEnd: releaseNearEnd,
+                    immediateReleaseNearEnd: releaseNearEnd,
+                    connectedEver: !noConnection,
+                    cadStatus: session?.cadStatus ?? null,
+                    cadCause: session?.cadCause ?? null,
+                    cadCauseLabel,
+                    cafReason: session?.cafReason ?? null,
+                    cafReasonLabel,
+                    terminalMarker,
+                    terminalMarkerLabel: terminalMarker === 'CAF'
+                        ? `CAF reason ${session?.cafReason ?? 'N/A'} (${cafReasonLabel})`
+                        : terminalMarker,
+                    evaluation: (session?.cadCause === 102)
+                        ? (releaseNearEnd
+                            ? 'Setup timer expired before call connection (CAD cause 102: timer expiry); explicit release/reject marker observed near setup end.'
+                            : 'Setup timer expired before call connection (CAD cause 102: timer expiry); no explicit release/reject marker was decoded near setup end.')
+                        : ((hasDirectTransfer && !releaseNearEnd && terminalMarker === 'CAF')
+                            ? `Signaling progressed into NAS/CC exchange (e.g., SETUP + IDENTITY), but no explicit L3 RELEASE/REJECT cause was decoded near the end; the termination marker is CAF(reason=${session?.cafReason ?? 'N/A'} - ${cafReasonLabel}). Attribution therefore relies primarily on radio DL evidence for this case.`
+                            : (releaseNearEnd
+                                ? 'An explicit L3 release/reject was observed near the end, which strengthens core/signaling attribution (especially under healthy radio conditions).'
+                                : 'No explicit L3 release/reject cause was decoded near setup end.'))
+                },
+                interpretation: {
+                    summary: interpretation
+                },
+                classification: {
+                    resultType: classification?.resultType || 'CALL_SETUP_FAILURE',
+                    category: classification?.category || 'SETUP_FAIL_UNKNOWN',
+                    domain: classification?.domain || 'Undetermined',
+                    confidence: Number.isFinite(classification?.confidence) ? classification.confidence : 0.5,
+                    reason: classification?.reason || null
+                },
+                confidence: {
+                    score,
+                    normalized: Math.min(0.95, score / 100),
+                    breakdown
+                },
+                recommendedActions: Array.isArray(classification?.recommendations) ? classification.recommendations : []
+            };
+        };
+
+        const classify = (session, snapshot) => {
+            const fmtNum = (v, unit) => Number.isFinite(v) ? `${v.toFixed(1)}${unit ? ` ${unit}` : ''}` : null;
+            const decodeCadCause = (cause) => {
+                const map = {
+                    16: 'Normal call clearing',
+                    17: 'User busy',
+                    18: 'No user responding',
+                    19: 'No answer from user',
+                    21: 'Call rejected',
+                    27: 'Destination out of order',
+                    34: 'No circuit/channel available',
+                    41: 'Temporary failure',
+                    42: 'Switching equipment congestion',
+                    47: 'Resource unavailable',
+                    102: 'Setup timeout (timer expiry)'
+                };
+                return map[cause] || 'Unknown cause';
+            };
+            const buildCoreReason = (s, snap, causeLabel) => {
+                const rscpTxt = Number.isFinite(snap?.rscpMedian) ? snap.rscpMedian.toFixed(1) : 'n/a';
+                const ecnoTxt = Number.isFinite(snap?.ecnoMedian) ? snap.ecnoMedian.toFixed(1) : 'n/a';
+                const txTxt = Number.isFinite(snap?.txP90) ? snap.txP90.toFixed(1) : 'n/a';
+                const blerTxt = Number.isFinite(snap?.blerMax) ? snap.blerMax.toFixed(1) : 'n/a';
+                const radioSummary = `RSCP ${rscpTxt} dBm, EcNo ${ecnoTxt} dB, UE Tx p90 ${txTxt} dBm, BLER max ${blerTxt}%.`;
+                const causeText = s?.cadCause === 18
+                    ? 'Cause 18 (No user responding) indicates call-control timeout or no response from downstream network element.'
+                    : `CAD cause ${s?.cadCause ?? 'n/a'} (${causeLabel}).`;
+                return [
+                    `Radio conditions were stable during setup attempt (${radioSummary})`,
+                    'An immediate signaling release was observed at failure time.',
+                    causeText,
+                    'This strongly indicates a core or higher-layer signaling termination rather than a radio-originated setup failure.'
+                ].join(' ');
+            };
+            const sortRec = (arr) => {
+                const rank = { P0: 0, P1: 1, P2: 2 };
+                return (arr || []).slice().sort((a, b) => (rank[a?.priority] ?? 9) - (rank[b?.priority] ?? 9));
+            };
+            const ACTION_ID_ALIASES = {
+                SOLVE_INTERFERENCE_UNDER_STRONG_SIGNAL: 'SOLVE_INTERFERENCE_STRONG_SIGNAL'
+            };
+            const canonicalActionId = (actionId) => {
+                const id = String(actionId || '').trim().toUpperCase();
+                return ACTION_ID_ALIASES[id] || id;
+            };
+            const metricRangeFromSeries = (series, fallbackMin, fallbackMax) => {
+                const vals = Array.isArray(series) ? series.map(v => Number(v?.value)).filter(Number.isFinite) : [];
+                if (vals.length) return { min: Math.min(...vals), max: Math.max(...vals) };
+                return {
+                    min: Number.isFinite(fallbackMin) ? fallbackMin : null,
+                    max: Number.isFinite(fallbackMax) ? fallbackMax : null
+                };
+            };
+            const buildInterferenceStrongSignalDetails = (s, snap) => {
+                const rscpRange = metricRangeFromSeries(snap?.seriesRscp, snap?.rscpMin, snap?.rscpLast);
+                const ecnoRange = metricRangeFromSeries(snap?.seriesEcno, snap?.ecnoMin, snap?.ecnoLast);
+                const pp = snap?.pilotPollution || {};
+                const strong = pp?.strongRscpBadEcno || {};
+                const validBest = Number.isFinite(strong?.denomBestValid) ? strong.denomBestValid : 0;
+                const totalMimo = Number.isFinite(strong?.denomTotalMimo) ? strong.denomTotalMimo : 0;
+                const strongCount = Number.isFinite(strong?.strongCount) ? strong.strongCount : 0;
+                const strongBadCount = Number.isFinite(strong?.strongBadCount) ? strong.strongBadCount : 0;
+                const strongSharePct = validBest > 0 ? Math.round((strongCount / validBest) * 100) : 0;
+                const strongBadPct = validBest > 0 ? Math.round((strongBadCount / validBest) * 100) : 0;
+                const fmt = (v, d = 1) => Number.isFinite(v) ? Number(v).toFixed(d) : 'n/a';
+                const k = Number.isFinite(pp?.deltaStats?.samplesWith2Pilots) ? pp.deltaStats.samplesWith2Pilots : 0;
+                const y = Number.isFinite(pp?.deltaStats?.totalMimoSamples) ? pp.deltaStats.totalMimoSamples : totalMimo;
+                const deltaMedian = Number.isFinite(pp?.deltaStats?.medianDb) ? `${Number(pp.deltaStats.medianDb).toFixed(2)} dB` : 'n/a';
+                const lt3 = Number.isFinite(pp?.deltaStats?.lt3dbRatio) ? `${Math.round(Number(pp.deltaStats.lt3dbRatio) * 100)}%` : 'n/a';
+                const cov = Number.isFinite(pp?.deltaStats?.coverageRatio) ? `${Math.round(Number(pp.deltaStats.coverageRatio) * 100)}%` : 'n/a';
+                const deltaLine = `Dominance gap (best-2nd): ${deltaMedian}; <3 dB ratio: ${lt3}; coverage ratio: ${cov} (${k}/${y}).`;
+                const deltaUnavailable = k === 0 ? `ΔRSCP not computable (0/${y} ≥2-pilot timestamps). Dominance inference disabled.` : null;
+                return [
+                    'DL interference-under-strong-signal verification:',
+                    `- RSCP (min/median/max): ${fmt(rscpRange.min)} / ${fmt(snap?.rscpMedian)} / ${fmt(rscpRange.max)} dBm`,
+                    `- EcNo (min/median/max): ${fmt(ecnoRange.min)} / ${fmt(snap?.ecnoMedian)} / ${fmt(ecnoRange.max)} dB`,
+                    `- BLER max: ${fmt(snap?.blerMax)} %`,
+                    `- UE Tx p90: ${fmt(snap?.txP90)} dBm`,
+                    `- Strong RSCP share (> -85 dBm): ${strongSharePct}% (${strongCount}/${validBest})`,
+                    `- Strong RSCP+bad EcNo ratio: ${strongBadPct}% (${strongBadCount}/${strongCount})`,
+                    `- ${deltaLine}`,
+                    `- Strong RSCP+bad EcNo computed on ${strongBadCount}/${validBest || totalMimo} best-server samples.`,
+                    ...(deltaUnavailable ? [`- ${deltaUnavailable}`] : []),
+                    `- Best-server denominator: ${validBest}/${totalMimo}`
+                ].join('\n');
+            };
+            const buildRecommendations = (resultType, category, s, snap) => {
+                const map = {
+                    DROP_INTERFERENCE: [
+                        { priority: 'P0', actionId: 'RESOLVE_PILOT_POLLUTION', action: 'Resolve Pilot Pollution', rationale: 'Pilot Pollution risk is high; apply overlap/dominance remediation to stabilize serving behavior.', ownerHint: 'RAN Optimization' },
+                        { priority: 'P0', actionId: 'VALIDATE_PILOT_DOMINANCE_DROP_CLUSTER', action: 'Validate pilot dominance in drop cluster (ΔRSCP(best-2nd)<3 dB, active set size >=3, CPICH review).', rationale: 'Weak serving dominance and large active set indicate pilot pollution risk in interference drops.', ownerHint: 'RAN Optimization' },
+                        { priority: 'P0', actionId: 'AUDIT_PILOT_POLLUTION_SHO', action: 'Audit pilot pollution/dominance and SHO settings in drop area.', rationale: 'Good RSCP with poor quality/BLER indicates interference.', ownerHint: 'Optimization' },
+                        { priority: 'P0', actionId: 'CHECK_INTERFERENCE_SOURCES', action: 'Check localized interference sources by time/location correlation.', rationale: 'Interference is often recurrent and localized.', ownerHint: 'Field' },
+                        { priority: 'P1', actionId: 'VERIFY_DL_QUALITY_KPIS', action: 'Review EcNo/BLER/SHO KPIs on serving and strong neighbors.', rationale: 'Confirms persistence and impacted cells.', ownerHint: 'RAN' }
+                    ],
+                    DROP_COVERAGE_UL: [
+                        { priority: 'P0', actionId: 'INVEST_UL_TX_SAT_ZONES', action: 'Investigate uplink coverage limits and UE Tx saturation zones.', rationale: 'High UE Tx near max indicates UL-limited coverage; cluster these zones to target RAN fixes.', ownerHint: 'RAN' },
+                        { priority: 'P1', actionId: 'OPT_NEIGHBOR_LAYER_WEAK_COVERAGE', action: 'Tune neighbors/layer fallback for edge robustness.', rationale: 'Improves retention at coverage edge.', ownerHint: 'Optimization' }
+                    ],
+                    DROP_COVERAGE_DL: [
+                        { priority: 'P0', actionId: 'CHECK_DL_COVERAGE_AZIMUTH_TILT', action: 'Investigate DL coverage weakness (tilt/azimuth/overshoot).', rationale: 'Very weak DL quality drives drops.', ownerHint: 'RAN' },
+                        { priority: 'P1', actionId: 'TUNE_NEIGHBOR_SHO_PARAMETERS', action: 'Tune neighbor and SHO parameters for smoother transition.', rationale: 'Reduces edge release risk.', ownerHint: 'Optimization' }
+                    ],
+                    SETUP_TIMEOUT: [
+                        { priority: 'P0', actionId: 'TRACE_SETUP_TIMEOUT_PATH', action: 'Trace CAD cause 102 timeout path across RNC/core signaling.', rationale: 'Timer expiry implies setup signaling did not complete.', ownerHint: 'Core' },
+                        { priority: 'P1', actionId: 'CHECK_SIGNALING_LATENCY_RETX', action: 'Check signaling latency/retransmission spikes at failure times.', rationale: 'Delay spikes are common timeout drivers.', ownerHint: 'Transport' }
+                    ],
+                    SETUP_FAIL_UL_COVERAGE: [
+                        { priority: 'P0', actionId: 'INVEST_UL_TX_SAT_ZONES', action: 'Investigate uplink coverage limits and UE Tx saturation zones.', rationale: 'High UE Tx near max indicates UL-limited coverage; cluster these zones to target RAN fixes.', ownerHint: 'RAN' },
+                        { priority: 'P1', actionId: 'OPT_NEIGHBOR_LAYER_WEAK_COVERAGE', action: 'Optimize neighbor/layer options in weak-coverage routes.', rationale: 'Raises setup success at edge.', ownerHint: 'Optimization' }
+                    ],
+                    SETUP_FAIL_DL_INTERFERENCE: [
+                        { priority: 'P0', actionId: 'SOLVE_INTERFERENCE_STRONG_SIGNAL', action: 'Solve interference-under-strong-signal.', rationale: 'BLER high under acceptable RSCP with low UL Tx indicates downlink interference/noise-rise decode impairment.', ownerHint: 'RAN Optimization' },
+                        { priority: 'P1', actionId: 'COLLECT_DOMINANCE_CONTEXT', action: 'Collect additional dominance context (CELLMEAS neighbors + >=2 pilot availability).', rationale: 'When overlap is not measurable, multi-pilot evidence is required before dominance remediation.', ownerHint: 'Optimization' },
+                        { priority: 'P1', actionId: 'VERIFY_DL_QUALITY_KPIS', action: 'Review EcNo/BLER distributions on affected serving/overlap cells.', rationale: 'Validates persistent interference footprint.', ownerHint: 'RAN' },
+                        { priority: 'P1', actionId: 'MAP_CAF_REASON_CODES', action: 'Decode/map CAF reason codes for setup failures.', rationale: 'CAF is the terminal marker; mapping reason values improves attribution consistency.', ownerHint: 'Optimization' }
+                    ],
+                    SETUP_FAIL_MOBILITY: [
+                        { priority: 'P0', actionId: 'AUDIT_SETUP_MOBILITY', action: 'Audit mobility events and neighbor readiness around setup failure.', rationale: 'Setup failed shortly after HO/SHO activity.', ownerHint: 'Optimization' },
+                        { priority: 'P1', actionId: 'TUNE_SETUP_HO_THRESHOLDS', action: 'Tune HO thresholds/hysteresis/TTT to reduce late mobility transitions during setup.', rationale: 'Late mobility transitions can destabilize setup completion.', ownerHint: 'Optimization' }
+                    ],
+                    SETUP_FAIL_CONGESTION: [
+                        { priority: 'P0', actionId: 'CHECK_SETUP_RESOURCE_LIMITS', action: 'Check code/power/admission resource limits at setup failure time.', rationale: 'Resource shortage can block setup completion.', ownerHint: 'RAN' },
+                        { priority: 'P1', actionId: 'APPLY_SETUP_LOAD_BALANCING', action: 'Apply load balancing/capacity optimization on impacted cells.', rationale: 'Reduces setup blocking during busy periods.', ownerHint: 'Optimization' }
+                    ],
+                    SETUP_FAIL_SIGNALING_OR_CORE: [
+                        { priority: 'P0', actionId: 'TRACE_SETUP_CORE_SIGNALING', action: 'Trace setup signaling path across RNC/core for reject/release causes.', rationale: 'Radio appears healthy; signaling/core path is most likely.', ownerHint: 'Core' },
+                        { priority: 'P1', actionId: 'CHECK_CONTROL_PLANE_LATENCY', action: 'Check control-plane latency/retransmissions around setup end.', rationale: 'Timing and retransmission issues commonly affect setup completion.', ownerHint: 'Transport' }
+                    ]
+                };
+                const fallback = resultType === 'DROP_CALL'
+                    ? [
+                        { priority: 'P0', actionId: 'CAPTURE_EVIDENCE_BUNDLE', action: 'Collect full evidence bundle (events + 10s radio series) for clustered drops.', rationale: 'Unknown drops need richer context.', ownerHint: 'Optimization' },
+                        { priority: 'P1', actionId: 'EXPAND_PARSER_RELEASE_CAUSES', action: 'Expand parser coverage for missing release causes.', rationale: 'Improves classification determinism.', ownerHint: 'RAN' }
+                    ]
+                    : [
+                        { priority: 'P0', actionId: 'CAPTURE_EVIDENCE_BUNDLE', action: 'Collect expanded signaling/radio context for setup failures.', rationale: 'Unknown setup failures need richer context.', ownerHint: 'Optimization' },
+                        { priority: 'P1', actionId: 'EXPAND_PARSER_RELEASE_CAUSES', action: 'Add missing reject/release parser hooks if available.', rationale: 'Improves attribution quality.', ownerHint: 'RAN' }
+                    ];
+                const recs = (map[category] || fallback).slice(0, 4).map((rec) => {
+                    const next = { ...rec };
+                    const canon = canonicalActionId(next.actionId || '');
+                    if (canon) next.actionId = canon;
+                    if (canon === 'SOLVE_INTERFERENCE_STRONG_SIGNAL') {
+                        next.title = 'Solve interference-under-strong-signal';
+                        next.detailsText = buildInterferenceStrongSignalDetails(s, snap);
+                    }
+                    return next;
+                });
+                return sortRec(recs);
+            };
+            const withNarrative = (cls) => {
+                const why = Array.isArray(cls?.evidence) ? cls.evidence.filter(Boolean).map(String) : [];
+                const sig = [];
+                const rscpTxt = fmtNum(snapshot?.rscpMedian, 'dBm');
+                const ecnoTxt = fmtNum(snapshot?.ecnoMedian, 'dB');
+                const blerTxt = snapshot?.blerEvidence ? fmtNum(snapshot?.blerMax, '%') : null;
+                const txTxt = fmtNum(snapshot?.txP90, 'dBm');
+                if (rscpTxt) sig.push(`RSCP median: ${rscpTxt}`);
+                if (ecnoTxt) sig.push(`Ec/No median: ${ecnoTxt}`);
+                if (blerTxt) sig.push(`BLER max: ${blerTxt}`);
+                if (!snapshot?.blerEvidence) sig.push(`BLER: not informative (insufficient RLC BLER samples during setup${Number.isFinite(snapshot?.rlcBlerSamplesCount) ? `: ${snapshot.rlcBlerSamplesCount}` : ''})`);
+                if (txTxt) sig.push(`UE Tx p90: ${txTxt}`);
+                const pp = snapshot?.pilotPollution || null;
+                const ppScore = Number.isFinite(pp?.score) ? pp.score : (Number.isFinite(pp?.pollutionScore) ? pp.pollutionScore : null);
+                const ppLevel = pp?.riskLevel || pp?.pollutionLevel || null;
+                if (pp && Number.isFinite(ppScore)) {
+                    const d = pp.details || {};
+                    const deltaStats = pp.deltaStats || {};
+                    const deltaMedian = Number.isFinite(deltaStats.medianDb) ? deltaStats.medianDb : d.deltaMedian;
+                    const deltaRatio = Number.isFinite(deltaStats.lt3dbRatio) ? deltaStats.lt3dbRatio : d.deltaRatio;
+                    sig.push(`Pilot pollution risk: ${ppLevel || 'Unknown'} (${ppScore}/100)`);
+                    sig.push(`ΔRSCP median=${Number.isFinite(deltaMedian) ? deltaMedian.toFixed(2) : 'n/a'} dB, ΔRSCP<3dB ratio=${Number.isFinite(deltaRatio) ? (deltaRatio * 100).toFixed(0) : 'n/a'}%`);
+                }
+                sig.forEach(s => { if (why.length < 6) why.push(s); });
+                let recs = buildRecommendations(cls.resultType, cls.category, session, snapshot);
+                const shouldRecommendPollution = (pilotPollution) => {
+                    const ds = pilotPollution?.deltaStats;
+                    if (!ds || !Number.isFinite(ds.totalMimoSamples) || ds.totalMimoSamples <= 0) return false;
+                    const ratio = (Number(ds.samplesWith2Pilots) || 0) / ds.totalMimoSamples;
+                    const level = String(pilotPollution?.riskLevel || pilotPollution?.pollutionLevel || '').trim();
+                    const guarded = Boolean(pilotPollution?.strongDominanceGuard);
+                    return !guarded && (level === 'High' || level === 'Moderate') && ratio >= 0.30;
+                };
+                const allowResolvePilot = shouldRecommendPollution(pp);
+                if (allowResolvePilot) {
+                    const exists = recs.some(r => String(r?.actionId || '').toUpperCase() === 'RESOLVE_PILOT_POLLUTION');
+                    if (!exists) {
+                        recs = sortRec([
+                            {
+                                priority: 'P0',
+                                actionId: 'RESOLVE_PILOT_POLLUTION',
+                                action: 'Resolve Pilot Pollution',
+                                rationale: 'Pilot Pollution/overlap risk is high; resolve dominance collapse before or alongside category-specific actions.',
+                                ownerHint: 'RAN Optimization'
+                            },
+                            ...recs
+                        ]).slice(0, 4);
+                    }
+                }
+                if (!allowResolvePilot) recs = recs.filter(r => String(r?.actionId || '').toUpperCase() !== 'RESOLVE_PILOT_POLLUTION');
+                const confPct = Math.round((Number(cls.confidence) || 0) * 100);
+                const durationSec = (Number.isFinite(session?.startTs) && Number.isFinite(session?.endTsReal) && session.endTsReal >= session.startTs)
+                    ? ((session.endTsReal - session.startTs) / 1000)
+                    : null;
+                let whatHappened = 'Session analyzed.';
+                if (cls.resultType === 'DROP_CALL') whatHappened = 'Call dropped after connection with abnormal end behavior.';
+                if (cls.resultType === 'CALL_SETUP_FAILURE') whatHappened = 'Call setup failed before connection was established.';
+                if (cls.resultType === 'INCOMPLETE_OR_UNKNOWN_END') whatHappened = 'Call connected but no explicit end marker was found in parsed range.';
+                let summary = `${cls.category} (${confPct}%).`;
+                if (cls.resultType === 'DROP_CALL') {
+                    summary = `A UMTS voice call dropped${Number.isFinite(durationSec) ? ` after ${durationSec.toFixed(1)}s` : ''}. The most likely cause is ${cls.category} (${confPct}%), driven by ${(why.slice(0, 3).join('; ') || 'available abnormal-end indicators')}.`;
+                } else if (cls.resultType === 'CALL_SETUP_FAILURE') {
+                    const dlSig = cls.category === 'SETUP_FAIL_DL_INTERFERENCE' &&
+                        (snapshot?.blerEvidence === true || (Number.isFinite(snapshot?.blerMax) && snapshot.blerMax >= 95)) &&
+                        Number.isFinite(snapshot?.blerMax) && snapshot.blerMax >= 80 &&
+                        Number.isFinite(snapshot?.txP90) && snapshot.txP90 <= 18 &&
+                        Number.isFinite(snapshot?.rscpMedian) && snapshot.rscpMedian >= -90;
+                    const hasL3Release = Array.isArray(session?.eventTimeline) && session.eventTimeline.some(e => /(RELEASE|REJECT)/i.test(`${e?.event || ''} ${e?.details || ''}`));
+                    const hasDirectTransfer = Array.isArray(session?.eventTimeline) && session.eventTimeline.some(e => /DIRECT_TRANSFER/i.test(`${e?.event || ''} ${e?.details || ''}`));
+                    const cafReason = Number.isFinite(session?.cafReason) ? session.cafReason : null;
+                    const cafReasonLabel = (() => {
+                        const map = {
+                            0: 'Unknown/Not provided',
+                            1: 'User action / call aborted (tool-specific)',
+                            2: 'Setup failed / call attempt aborted (network or radio procedure failed)',
+                            3: 'Call rejected (tool-specific)'
+                        };
+                        return map[cafReason] || 'Unknown/tool-specific reason';
+                    })();
+                    summary = `A UMTS call setup failed before connection${Number.isFinite(durationSec) ? ` (~${durationSec.toFixed(1)}s after start)` : ''}.`;
+                    if (dlSig) {
+                        summary += ` Coverage was acceptable (RSCP median ${Number(snapshot.rscpMedian).toFixed(1)} dBm) and UL margin was strong (UE Tx p90 ${Number(snapshot.txP90).toFixed(1)} dBm), ruling out UL limitation; downlink quality was degraded (EcNo median ${Number.isFinite(snapshot?.ecnoMedian) ? Number(snapshot.ecnoMedian).toFixed(1) : 'n/a'} dB) and DL decoding collapsed (BLER max ${Number.isFinite(snapshot?.blerMax) ? Number(snapshot.blerMax).toFixed(1) : 'n/a'}%), matching a DL decode-impairment signature.`;
+                    } else {
+                        summary += ` Radio metrics were RSCP ${Number.isFinite(snapshot?.rscpMedian) ? Number(snapshot.rscpMedian).toFixed(1) : 'n/a'} dBm, EcNo ${Number.isFinite(snapshot?.ecnoMedian) ? Number(snapshot.ecnoMedian).toFixed(1) : 'n/a'} dB, UE Tx p90 ${Number.isFinite(snapshot?.txP90) ? Number(snapshot.txP90).toFixed(1) : 'n/a'} dBm, ${snapshot?.blerEvidence ? `BLER max ${Number.isFinite(snapshot?.blerMax) ? Number(snapshot.blerMax).toFixed(1) : 'n/a'}%` : 'BLER n/a (insufficient setup-phase evidence)'}.`;
+                    }
+                    if (hasDirectTransfer && !hasL3Release && cafReason !== null) {
+                        summary += ` Signaling progressed into NAS/CC exchange, but no explicit L3 RELEASE/REJECT was decoded; termination marker was CAF(reason=${cafReason} - ${cafReasonLabel}).`;
+                    } else if (hasL3Release) {
+                        summary += ' An explicit L3 release/reject was observed near end.';
+                    }
+                }
+                if (Number.isFinite(snapshot?.lastPsc) || Number.isFinite(snapshot?.lastUarfcn)) {
+                    summary += ` Serving context near end: PSC ${Number.isFinite(snapshot?.lastPsc) ? snapshot.lastPsc : 'N/A'} / UARFCN ${Number.isFinite(snapshot?.lastUarfcn) ? snapshot.lastUarfcn : 'N/A'}.`;
+                }
+                if (Number.isFinite(session?.cafReason)) {
+                    const cafMap = {
+                        0: 'Unknown/Not provided',
+                        1: 'User action / call aborted (tool-specific)',
+                        2: 'Setup failed / call attempt aborted (network or radio procedure failed)',
+                        3: 'Call rejected (tool-specific)'
+                    };
+                    summary += ` CAF reason ${session.cafReason} (${cafMap[session.cafReason] || 'Unknown/tool-specific reason'}).`;
+                }
+                const metricLine = [rscpTxt ? `RSCP ${rscpTxt}` : null, ecnoTxt ? `Ec/No ${ecnoTxt}` : null, blerTxt ? `BLER max ${blerTxt}` : null, txTxt ? `UE Tx p90 ${txTxt}` : null].filter(Boolean);
+                if (!snapshot?.blerEvidence) metricLine.push('BLER n/a (insufficient setup-phase evidence)');
+                if (metricLine.length) summary += ` Final-window radio metrics: ${metricLine.join(', ')}.`;
+                const deltaStats = pp?.deltaStats || null;
+                if (Number.isFinite(deltaStats?.totalMimoSamples) && deltaStats.totalMimoSamples > 0 && (Number(deltaStats?.samplesWith2Pilots) || 0) === 0) {
+                    summary += ` Dominance inference disabled (${Number(deltaStats?.samplesWith2Pilots) || 0}/${deltaStats.totalMimoSamples} >=2-pilot timestamps).`;
+                } else if (Number.isFinite(deltaStats?.totalMimoSamples) && Number(deltaStats?.samplesWith2Pilots) > 0) {
+                    summary += ` ΔRSCP dominance was computed on ${Number(deltaStats.samplesWith2Pilots)}/${deltaStats.totalMimoSamples} timestamps meeting the >=2-pilot criterion.`;
+                }
+                const cleanAction = (txt) => String(txt || '').trim().replace(/[.]+$/g, '');
+                const p0 = recs.filter(r => r.priority === 'P0').map(r => cleanAction(r.action)).filter(Boolean).slice(0, 2);
+                if (p0.length) summary += ` Recommended next actions: ${p0.join('; ')}.`;
+                return {
+                    ...cls,
+                    explanation: {
+                        whatHappened,
+                        whyWeThinkSo: why,
+                        keySignals: {
+                            ...(Number.isFinite(snapshot?.rscpMedian) ? { rscp: snapshot.rscpMedian } : {}),
+                            ...(Number.isFinite(snapshot?.ecnoMedian) ? { ecno: snapshot.ecnoMedian } : {}),
+                            ...(Number.isFinite(snapshot?.blerMax) ? { blerMax: snapshot.blerMax } : {}),
+                            ...(Number.isFinite(snapshot?.txP90) ? { txP90: snapshot.txP90 } : {}),
+                            ...(Number.isFinite(snapshot?.lastPsc) ? { lastPsc: String(snapshot.lastPsc) } : {}),
+                            ...(Number.isFinite(snapshot?.lastUarfcn) ? { lastUarfcn: String(snapshot.lastUarfcn) } : {}),
+                            ...(pp && Number.isFinite(ppScore) ? { pollutionScore: ppScore, pollutionLevel: ppLevel || 'Unknown' } : {})
+                        }
+                    },
+                    pilotPollution: pp || null,
+                    recommendations: recs,
+                    oneParagraphSummary: summary
+                };
+            };
+            const num = (v) => Number.isFinite(v) ? v : null;
+            const cause = session.cadCause;
+            const tx = num(snapshot?.txP90);
+            const rscp = num(snapshot?.rscpMedian);
+            const ecno = num(snapshot?.ecnoMedian);
+            const bler = num(snapshot?.blerMax);
+            const hasTimelineMatch = (regex) => Array.isArray(session?.eventTimeline) && session.eventTimeline.some(e => regex.test(`${e?.event || ''} ${e?.details || ''}`));
+            const findLastHoDeltaSec = () => {
+                const endTs = Number.isFinite(session?.endTsReal) ? session.endTsReal : null;
+                if (!endTs || !Array.isArray(session?.eventTimeline)) return null;
+                const hoTs = session.eventTimeline
+                    .map(e => Number.isFinite(e?.ts) ? e.ts : Date.parse(e?.time || ''))
+                    .filter(ts => Number.isFinite(ts) && ts <= endTs)
+                    .filter((ts, idx) => {
+                        const raw = `${session.eventTimeline[idx]?.event || ''} ${session.eventTimeline[idx]?.details || ''}`.toUpperCase();
+                        return raw.includes('HO') || raw.includes('HANDOVER') || raw.includes('SHO');
+                    })
+                    .sort((a, b) => a - b);
+                if (!hoTs.length) return null;
+                return (endTs - hoTs[hoTs.length - 1]) / 1000;
+            };
+            const radioHealthy = (
+                rscp !== null && rscp > -85 &&
+                ecno !== null && ecno > -10 &&
+                tx !== null && tx < 20 &&
+                snapshot?.blerEvidence === true &&
+                bler !== null && bler < 5
+            );
+            const mk = (resultType, category, domain, reason, confidence, evidence) => ({
+                resultType,
+                category,
+                domain,
+                reason,
+                confidence,
+                evidence
+            });
+
+            if (session.resultType === 'SUCCESS') {
+                return withNarrative(mk('SUCCESS', 'SUCCESS', 'Normal', 'SUCCESS: normal clearing (CAD status=1, cause=16).', 1, ['CAD status=1 and cause=16']));
+            }
+            if (session.resultType === 'CALL_SETUP_FAILURE') {
+                const hasSignalingReleaseReject = hasTimelineMatch(/(REJECT|RELEASE|CAUSE|FAIL)/i);
+                // 1) UL coverage
+                if (tx !== null && tx >= 21 && ((rscp !== null && rscp <= -95) || (ecno !== null && ecno <= -16) || (bler !== null && bler >= 20))) {
+                    return withNarrative(mk('CALL_SETUP_FAILURE', 'SETUP_FAIL_UL_COVERAGE', 'Radio/Coverage', 'SETUP_FAIL_UL_COVERAGE: high UE Tx with weak/unstable uplink conditions.', 0.85, [`txP90=${tx}`, `rscpMedian=${rscp}`, `ecnoMedian=${ecno}`, `blerMax=${bler}`]));
+                }
+                // 2) DL interference
+                if ((snapshot?.blerEvidence === true || (bler !== null && bler >= 95)) && bler !== null && bler >= 80 && (tx === null || tx <= 18) && rscp !== null && rscp >= -90) {
+                    const ev = [
+                        `blerMax=${bler} >= 80 (DL decode failure signature)`,
+                        `txP90=${tx} <= 18 (UL margin OK; not UL-limited)`,
+                        `rscpMedian=${rscp} >= -90 (coverage OK)`
+                    ];
+                    if (ecno !== null) ev.push(`ecnoMedian=${ecno} dB (${ecno <= -12 ? 'quality degraded' : 'quality OK'})`);
+                    if (snapshot?.blerEvidence !== true) ev.push('BLER evidence is limited (<3 RLCBLER rows), but BLER collapse is extreme and retained as supporting evidence.');
+                    const ds = snapshot?.pilotPollution?.deltaStats;
+                    if (ds && Number.isFinite(ds.totalMimoSamples) && ds.totalMimoSamples > 0) {
+                        ev.push(`ΔRSCP computed on ${(ds.samplesWith2Pilots || 0)}/${ds.totalMimoSamples} timestamps meeting >=2-pilot criterion.`);
+                        if ((ds.samplesWith2Pilots || 0) === 0) ev.push('Dominance/overlap inference disabled (no >=2 pilots).');
+                    }
+                    const reason =
+                        'DL decode impairment during setup: BLER is extremely high while UL power is low and RSCP is acceptable. ' +
+                        'This points to downlink quality collapse (interference/noise rise/control-channel decode issues), not UL limitation.';
+                    return withNarrative(mk('CALL_SETUP_FAILURE', 'SETUP_FAIL_DL_INTERFERENCE', 'Radio/Interference', reason, 0.8, ev));
+                }
+                // 3) Mobility
+                const hoDelta = findLastHoDeltaSec();
+                if (hoDelta !== null && hoDelta <= 5) {
+                    return withNarrative(mk('CALL_SETUP_FAILURE', 'SETUP_FAIL_MOBILITY', 'Radio/Mobility', 'SETUP_FAIL_MOBILITY: setup failure occurred shortly after mobility activity.', 0.8, [`Last HO/SHO event was ${hoDelta.toFixed(1)}s before setup end`]));
+                }
+                // 4) Congestion
+                if (hasTimelineMatch(/(NO[_\s-]?RESOURCE|ADMISSION|CONGEST|POWER LIMIT|CODE LIMIT|CE FULL|CHANNEL ALLOCATION FAILURE|NO RADIO RESOURCE)/i)) {
+                    return withNarrative(mk('CALL_SETUP_FAILURE', 'SETUP_FAIL_CONGESTION', 'Radio/Congestion', 'SETUP_FAIL_CONGESTION: resource/admission congestion indicators around setup failure.', 0.75, ['Resource/admission congestion markers found in signaling timeline']));
+                }
+                // 5) Core/signaling (with safety gate)
+                if (cause === 102) return withNarrative(mk('CALL_SETUP_FAILURE', 'SETUP_TIMEOUT', 'Signaling/Timeout', 'SETUP_TIMEOUT: CAD cause=102 (Setup timeout - timer expiry).', 0.85, ['CAD cause=102 (Setup timeout - timer expiry)', hasSignalingReleaseReject ? 'Explicit release/reject marker observed near setup end' : 'No explicit release/reject marker decoded near setup end']));
+                if (!(tx !== null && tx >= 21) && !(rscp !== null && rscp <= -90) && !(ecno !== null && ecno <= -14)) {
+                    const hasCongestionHints = hasTimelineMatch(/(NO[_\s-]?RESOURCE|ADMISSION|CONGEST|POWER LIMIT|CODE LIMIT|CE FULL|CHANNEL ALLOCATION FAILURE|NO RADIO RESOURCE)/i);
+                    const hasCoreIndicators = hasSignalingReleaseReject || session.cafReason !== null || session.cadStatus !== null || cause !== null;
+                    const hoDelta = findLastHoDeltaSec();
+                    const coreScore = (
+                        (radioHealthy ? 40 : 0) +
+                        (hasSignalingReleaseReject ? 25 : 0) +
+                        (!Number.isFinite(session?.connectedTs) ? 15 : 0) +
+                        (!(Number.isFinite(hoDelta) && hoDelta <= 5) ? 10 : 0) +
+                        (!hasCongestionHints ? 10 : 0)
+                    );
+                    if (radioHealthy && hasCoreIndicators && coreScore >= 70) {
+                        const causeLabel = decodeCadCause(cause);
+                        const reason = buildCoreReason(session, snapshot || {}, causeLabel);
+                        return withNarrative(mk(
+                            'CALL_SETUP_FAILURE',
+                            'SETUP_FAIL_SIGNALING_OR_CORE',
+                            'Core/Signaling',
+                            reason,
+                            Math.min(0.95, coreScore / 100),
+                            [
+                                'Radio appears healthy while signaling/release indicators exist near setup failure',
+                                `Core/signaling score=${coreScore}`,
+                                `CAD cause=${cause ?? 'n/a'} (${causeLabel})`
+                            ]
+                        ));
+                    }
+                }
+                return withNarrative(mk('CALL_SETUP_FAILURE', 'SETUP_FAIL_UNKNOWN', 'Undetermined', 'SETUP_FAIL_UNKNOWN: setup failed without dominant radio signature.', 0.5, ['No rule matched']));
+            }
+            if (session.resultType === 'DROP_CALL') {
+                if (rscp !== null && rscp >= -85 && ((ecno !== null && ecno <= -16) || (bler !== null && bler >= 50)) && (tx === null || tx <= 18)) {
+                    return withNarrative(mk('DROP_CALL', 'DROP_INTERFERENCE', 'Radio/Interference', 'DROP_INTERFERENCE: strong RSCP with bad quality/BLER and non-saturated Tx.', 0.7, [`rscpMedian=${rscp}`, `ecnoMedian=${ecno}`, `blerMax=${bler}`, `txP90=${tx}`]));
+                }
+                if (tx !== null && tx >= 21 && rscp !== null && rscp <= -95) {
+                    return withNarrative(mk('DROP_CALL', 'DROP_COVERAGE_UL', 'Radio/Coverage', 'DROP_COVERAGE_UL: high UE Tx and weak RSCP.', 0.7, [`txP90=${tx}`, `rscpMedian=${rscp}`]));
+                }
+                if (rscp !== null && rscp <= -108 && ecno !== null && ecno <= -14) {
+                    return withNarrative(mk('DROP_CALL', 'DROP_COVERAGE_DL', 'Radio/Coverage', 'DROP_COVERAGE_DL: very weak downlink coverage.', 0.7, [`rscpMedian=${rscp}`, `ecnoMedian=${ecno}`]));
+                }
+                return withNarrative(mk('DROP_CALL', 'DROP_UNKNOWN', 'Undetermined', 'DROP_UNKNOWN: connected call ended abnormally without dominant signature.', 0.5, ['No rule matched']));
+            }
+            if (session.resultType === 'INCOMPLETE_OR_UNKNOWN_END') {
+                return withNarrative(mk('INCOMPLETE_OR_UNKNOWN_END', 'INCOMPLETE_OR_UNKNOWN_END', 'Undetermined', 'Connected call has no explicit end marker (CAD/CAF/CARE) in parsed range.', 0.5, ['Connected without end marker']));
+            }
+            return withNarrative(mk('UNCLASSIFIED', 'UNCLASSIFIED', 'Undetermined', 'UNCLASSIFIED.', 0.5, ['No rule matched']));
+        };
+
+        const sessions = new Map();
+        const getSession = (sessionKey, callId, deviceId) => {
+            const key = String(sessionKey);
+            let s = sessions.get(key);
+            if (!s) {
+                s = {
+                    sessionKey: key,
+                    callId: String(callId || ''),
+                    deviceId: String(deviceId || ''),
+                    rat: 'UNKNOWN',
+                    startTs: null,
+                    connectedTs: null,
+                    cadStatus: null,
+                    cadCause: null,
+                    cafReason: null,
+                    endTsCad: null,
+                    endTsCaf: null,
+                    endTsCare: null,
+                    endTsReal: null,
+                    dialedNumber: null,
+                    resultType: 'UNCLASSIFIED',
+                    category: null,
+                    confidence: null,
+                    reason: null,
+                    snapshot: null,
+                    classification: null
+                };
+                sessions.set(key, s);
+            }
+            if (callId !== undefined && callId !== null && String(callId).trim() !== '') s.callId = String(callId);
+            if (deviceId !== undefined && deviceId !== null && String(deviceId).trim() !== '') s.deviceId = String(deviceId);
+            return s;
+        };
+
+        const lines = String(content || '').split(/\r?\n/);
+        // State for initial identification phases
+        const state = {
+            imsi: null,
+            cid: null,
+            rat: 'UNKNOWN'
+        };
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+            const parts = parseCsvLine(line);
+            const header = String(parts[0] || '').trim().toUpperCase();
+
+            if (header === '#START') {
+                setBaseDate(parseStartDate(parts));
+                continue;
+            }
+            // Initial identification phase
+            if (header === 'IMSI') {
+                state.imsi = String(parts[3] || '').trim();
+                continue;
+            }
+            if (header === 'CID') {
+                state.cid = String(parts[3] || '').trim();
+                continue;
+            }
+            if (header === 'RAT') {
+                state.rat = String(parts[3] || '').trim().toUpperCase();
+                continue;
+            }
+
+            if (!parts[1]) continue;
+            const ts = buildAbsMs(parts[1]);
+            if (!Number.isFinite(ts)) continue;
+
+            if (header === 'MIMOMEAS' || header === 'TXPC' || header === 'RLCBLER' || header === 'CELLMEAS') {
+                const deviceId = String(parts[3] || '').trim(); // Use deviceId from parts[3] as it's more reliable for radio events
+                addRadio(header, parts, ts, deviceId, state.rat);
+                addDeviceEvent(deviceId, ts, header, parts);
+                continue;
+            }
+            if (UMTS_TIMELINE_HEADERS.has(header)) {
+                const deviceId = String(parts[3] || '').trim();
+                if (deviceId) addDeviceEvent(deviceId, ts, header, parts);
+                continue;
+            }
+            if (!CALL_HEADERS.has(header)) continue;
+
+            const callId = String(parts[3] || '').trim();
+            if (!callId) continue;
+            const callDeviceId = String(parts[4] || '').trim();
+            const sessionKey = `${callDeviceId}:${callId}`;
+            const s = getSession(sessionKey, callId, callDeviceId);
+            if (state.rat) s.rat = String(state.rat).trim().toUpperCase() || s.rat;
+
+            if (header === 'CAA') {
+                if (!Number.isFinite(s.startTs) || ts < s.startTs) s.startTs = ts;
+                const dial = String(parts[7] || '').trim().replace(/^"|"$/g, '');
+                if (dial) s.dialedNumber = dial;
+                addDeviceEvent(s.deviceId, ts, header, parts);
+            } else if (header === 'CAC') {
+                const state = parseNumber(parts[6]);
+                if (state === 3 && !Number.isFinite(s.connectedTs)) s.connectedTs = ts;
+                addDeviceEvent(s.deviceId, ts, header, parts);
+            } else if (header === 'CAD') {
+                const status = parseNumber(parts[6]);
+                const cause = parseNumber(parts[7]);
+                s.cadStatus = status === null ? s.cadStatus : status;
+                s.cadCause = cause === null ? s.cadCause : cause;
+                s.endTsCad = ts;
+                addDeviceEvent(s.deviceId, ts, header, parts);
+            } else if (header === 'CAF') {
+                const reason = parseNumber(parts[6]);
+                s.cafReason = reason === null ? s.cafReason : reason;
+                s.endTsCaf = ts;
+                addDeviceEvent(s.deviceId, ts, header, parts);
+            } else if (header === 'CARE') {
+                s.endTsCare = ts;
+                addDeviceEvent(s.deviceId, ts, header, parts);
+            }
+        }
+
+        const out = Array.from(sessions.values()).sort((a, b) => {
+            const at = Number.isFinite(a.startTs) ? a.startTs : Number.POSITIVE_INFINITY;
+            const bt = Number.isFinite(b.startTs) ? b.startTs : Number.POSITIVE_INFINITY;
+            if (at !== bt) return at - bt;
+            return parseInt(a.callId, 10) - parseInt(b.callId, 10);
+        });
+
+        const summary = { totalCaaSessions: out.length, outcomes: { SUCCESS: 0, CALL_SETUP_FAILURE: 0, SETUP_FAILURE: 0, DROP_CALL: 0, INCOMPLETE_OR_UNKNOWN_END: 0, UNCLASSIFIED: 0 } };
+        const isSameCallEvent = (event, session) => {
+            if (!event || !session) return false;
+            const h = String(event.header || '').toUpperCase();
+            if (!CALL_HEADERS.has(h)) return true;
+            const evParts = parseCsvLine(event.raw || '');
+            const evCallId = String(evParts[3] || '').trim();
+            const evDeviceId = String(evParts[4] || '').trim();
+            return evCallId === String(session.callId || '') && evDeviceId === String(session.deviceId || '');
+        };
+        out.forEach(s => {
+            s.endTsReal = s.endTsCare || s.endTsCaf || s.endTsCad || null;
+            const connected = Number.isFinite(s.connectedTs);
+            const terminalCadSuccess = s.cadStatus === 1 && Number.isFinite(s.endTsCad);
+            const setupFailureLike = !connected && (Number.isFinite(s.endTsCaf) || s.cadStatus === 2 || s.cadCause === 102);
+            const abnormalAfterConnect = connected && (
+                Number.isFinite(s.endTsCare) ||
+                s.cadStatus === 2 ||
+                (Number.isFinite(s.cadCause) && !terminalCadSuccess && s.cadCause !== 16)
+            );
+
+            if (terminalCadSuccess || (connected && s.cadCause === 16)) s.resultType = 'SUCCESS';
+            else if (setupFailureLike) s.resultType = 'CALL_SETUP_FAILURE';
+            else if (abnormalAfterConnect) s.resultType = 'DROP_CALL';
+            else if (Number.isFinite(s.connectedTs)) s.resultType = 'INCOMPLETE_OR_UNKNOWN_END';
+            else s.resultType = 'UNCLASSIFIED';
+
+            if ((s.resultType === 'CALL_SETUP_FAILURE' || s.resultType === 'DROP_CALL') && Number.isFinite(s.endTsReal)) {
+                s.snapshot = buildSnapshot(s.endTsReal, s.deviceId || '');
+                if (s.snapshot) {
+                    s.snapshot.trendBasis = s.resultType === 'CALL_SETUP_FAILURE'
+                        ? 'last 10s before setup failure'
+                        : 'last 10s before drop/end';
+                }
+            }
+            s.markerTs = s.snapshot?.lastMimoTs ?? s.snapshot?.lastTxTs ?? s.endTsReal ?? null;
+            s.callStartTs = Number.isFinite(s.startTs) ? s.startTs : null;
+            s.analysisWindowStartTs = Number.isFinite(s.endTsReal)
+                ? (s.endTsReal - Math.max(1, windowSeconds) * 1000)
+                : null;
+            const cls = classify(s, s.snapshot);
+            s.classification = cls;
+            s.category = cls.category;
+            s.confidence = cls.confidence;
+            s.reason = cls.reason;
+            if (s.resultType === 'CALL_SETUP_FAILURE' && Number.isFinite(s.endTsReal)) {
+                s.contextBundle = buildSetupFailureContextBundle(s, 20, 20);
+            } else {
+                s.contextBundle = null;
+            }
+            s.setupFailureDeepAnalysis = buildSetupFailureDeepAnalysis(s, s.snapshot, s.contextBundle, s.classification);
+
+            summary.outcomes[s.resultType] = (summary.outcomes[s.resultType] || 0) + 1;
+            if (s.resultType === 'CALL_SETUP_FAILURE') summary.outcomes.SETUP_FAILURE += 1;
+            s.callStartTsIso = Number.isFinite(s.callStartTs) ? new Date(s.callStartTs).toISOString() : null;
+            s.analysisWindowStartTsIso = Number.isFinite(s.analysisWindowStartTs) ? new Date(s.analysisWindowStartTs).toISOString() : null;
+            s.markerTsIso = Number.isFinite(s.markerTs) ? new Date(s.markerTs).toISOString() : null;
+            s.startTsIso = s.callStartTsIso;
+            s.connectedTsIso = Number.isFinite(s.connectedTs) ? new Date(s.connectedTs).toISOString() : null;
+            s.endTsRealIso = Number.isFinite(s.endTsReal) ? new Date(s.endTsReal).toISOString() : null;
+            const deviceEvents = eventsByDevice.get(String(s.deviceId || '')) || [];
+            s.eventTimeline = (Number.isFinite(s.startTs) && Number.isFinite(s.endTsReal))
+                ? deviceEvents
+                    .filter(e => e.ts >= s.startTs && e.ts <= s.endTsReal)
+                    .filter(e => isSameCallEvent(e, s))
+                    .sort((a, b) => a.ts - b.ts)
+                    .filter((e, idx, arr) => idx === arr.findIndex(x => x.ts === e.ts && x.header === e.header && x.raw === e.raw))
+                    .map(e => ({ ts: e.ts, time: Number.isFinite(e.ts) ? new Date(e.ts).toISOString() : null, event: e.header, details: e.raw }))
+                : [];
+        });
+
+        return {
+            summary,
+            sessions: out,
+            radioSeries: {
+                byDevice: Array.from(radioStore.byDevice.entries()).map(([deviceId, dev]) => ({
+                    deviceId,
+                    mimoCount: dev.mimoRows.length,
+                    txpcCount: dev.txpcRows.length,
+                    rlcCount: dev.rlcRows.length
+                }))
+            }
+        };
+    },
+
+    toUiSessions(analysis) {
+        if (!analysis || !Array.isArray(analysis.sessions)) return [];
+        const toNum = (v) => (typeof v === 'number' && !Number.isNaN(v)) ? v : null;
+        return analysis.sessions.map(s => {
+            const snapshot = s.snapshot || null;
+            const timeline = snapshot && Array.isArray(snapshot.bestServerSamples)
+                ? snapshot.bestServerSamples.map(v => ({
+                    time: Number.isFinite(v.ts) ? new Date(v.ts).toISOString() : (s.endTsRealIso || s.endTsReal || null),
+                    rscp: toNum(v.rscp),
+                    ecno: toNum(v.ecno),
+                    bler_dl: toNum(snapshot.blerMax),
+                    properties: {
+                        'UE Tx Power': toNum(snapshot.txLast ?? snapshot.txP90),
+                        'BLER DL': toNum(snapshot.blerMax),
+                        'Trend Message': snapshot.trendMessage || ''
+                    }
+                }))
+                : [];
+
+            const sessionRat = String(s.rat || '').trim().toUpperCase();
+            const sessionPrefix = (sessionRat && sessionRat !== 'UNKNOWN') ? sessionRat : 'CALL';
+            return {
+                sessionId: `${sessionPrefix}-${s.callId}`,
+                kind: 'CALL_SESSION',
+                deviceId: s.deviceId || '',
+                callId: s.callId,
+                callTransactionId: s.callId,
+                imsi: null,
+                tmsi: null,
+                startTime: s.startTsIso || null,
+                endTime: s.endTsRealIso || s.startTsIso || null,
+                markerTime: s.markerTsIso || s.endTsRealIso || s.startTsIso || null,
+                markerTsIso: s.markerTsIso || null,
+                durationMs: (Number.isFinite(s.startTs) && Number.isFinite(s.endTsReal) && s.endTsReal >= s.startTs) ? (s.endTsReal - s.startTs) : null,
+                endType: s.resultType === 'DROP_CALL'
+                    ? 'DROP'
+                    : (s.resultType === 'CALL_SETUP_FAILURE'
+                        ? 'CALL_SETUP_FAILURE'
+                        : (s.resultType === 'INCOMPLETE_OR_UNKNOWN_END' ? 'INCOMPLETE_OR_UNKNOWN_END' : 'NORMAL')),
+                endTrigger: s.reason || s.category || s.resultType,
+                drop: s.resultType === 'DROP_CALL',
+                setupFailure: s.resultType === 'CALL_SETUP_FAILURE',
+                failureReason: {
+                    label: s.category || s.resultType,
+                    cause: s.reason || '-'
+                },
+                rrcStates: [],
+                rabLifecycle: [],
+                radioMeasurementsTimeline: timeline,
+                eventTimeline: Array.isArray(s.eventTimeline) ? s.eventTimeline : [],
+                umts: {
+                    resultType: s.resultType,
+                    classification: s.classification || null,
+                    snapshot: s.snapshot || null,
+                    contextBundle: s.contextBundle || null,
+                    setupFailureDeepAnalysis: s.setupFailureDeepAnalysis || null
+                },
+                contextBundle: s.contextBundle || null,
+                setupFailureDeepAnalysis: s.setupFailureDeepAnalysis || null,
+                _source: 'umts'
+            };
+        });
+    }
+};
+
+// Wide, tab-separated Nemo Handy / Benchmark exports are structurally very
+// different from the NMF record stream below.  A single timestamp is spread
+// over several rows (radio, throughput, service and event samples), therefore
+// this parser builds one geolocated snapshot per time/position and merges its
+// available KPI values.  It deliberately never manufactures missing KPIs.
+const BenchmarkTxtParser = {
+    isBenchmarkText(text) {
+        const header = String(text || '').split(/\r?\n/, 1)[0].replace(/^\uFEFF/, '');
+        return header.includes('\t') && /(?:^|\t)Time(?:\t|$)/i.test(header) &&
+            /(?:^|\t)(?:Lon\.?|Longitude)(?:\t|$)/i.test(header) &&
+            /(?:^|\t)(?:Lat\.?|Latitude)(?:\t|$)/i.test(header) &&
+            /(?:Cell type|RSRP|SINR)/i.test(header);
+    },
+
+    async parseFile(file, onProgress) {
+        if (!file || typeof file.slice !== 'function') {
+            throw new Error('Benchmark TXT parser: invalid file.');
+        }
+        const state = this._createState();
+        const chunkSize = 4 * 1024 * 1024;
+        let offset = 0;
+        let carry = '';
+        while (offset < file.size) {
+            const chunk = await file.slice(offset, offset + chunkSize).text();
+            offset += chunkSize;
+            const text = carry + chunk;
+            const lines = text.split(/\r?\n/);
+            carry = lines.pop() || '';
+            lines.forEach(line => this._consumeLine(state, line));
+            if (onProgress) {
+                const pct = 8 + Math.min(84, (Math.min(offset, file.size) / file.size) * 84);
+                onProgress(pct, `Reading Benchmark TXT… ${state.lineCount.toLocaleString()} rows`);
+            }
+            // Let the browser draw the progress overlay during a long import.
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+        if (carry) this._consumeLine(state, carry);
+        return this._finalize(state);
+    },
+
+    _createState() {
+        return {
+            header: null,
+            indexes: {},
+            metricSpecs: [],
+            snapshots: new Map(),
+            lineCount: 0,
+            gpsRows: 0,
+            validGpsRows: 0,
+            metricNames: new Set(),
+            mosMetric: null,
+            noGpsExamples: 0
+        };
+    },
+
+    _number(value) {
+        if (value === undefined || value === null || String(value).trim() === '') return null;
+        const n = Number(String(value).trim().replace(',', '.'));
+        return Number.isFinite(n) ? n : null;
+    },
+
+    _validCoordinate(lat, lng) {
+        return Number.isFinite(lat) && Number.isFinite(lng) &&
+            Math.abs(lat) <= 90 && Math.abs(lng) <= 180 &&
+            lat !== 0 && lng !== 0 && lat !== -999 && lng !== -999;
+    },
+
+    _normalizedHeader(value) {
+        return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    },
+
+    _displayMetric(header, index) {
+        const name = String(header || '').trim();
+        // In this Benchmark layout the first RSRP/RSRQ/SINR tuple is NR and
+        // the tuple at the end of the export is LTE.  Naming them explicitly
+        // avoids mixing 4G and 5G values under the same map layer.
+        if (/^(RSRP|RSRQ|SINR)$/i.test(name)) {
+            return `${index < 150 ? '5G' : '4G'} ${name.toUpperCase()}`;
+        }
+        return name;
+    },
+
+    // This is the same canonical component policy used by the Benchmark
+    // backend (_ca_row_cell_kind / _ca_component_from_row).  Do not infer a
+    // serving cell from a bare PCI: Cell type plus RAT decides the radio role.
+    _canonicalComponent(values, indexes) {
+        const rawRole = String(values[indexes.cellType] || '').trim();
+        const role = rawRole.toUpperCase();
+        if (!role) return null;
+        const ltePci = this._number(values[indexes.ltePci]);
+        const lteChannel = this._number(values[indexes.lteChannel]);
+        const nrPci = this._number(values[indexes.nrPci]);
+        const nrChannel = this._number(values[indexes.nrChannel]);
+        const band = String(values[indexes.band] || '').trim() || null;
+        const hasLte = Number.isFinite(ltePci) || Number.isFinite(lteChannel);
+        const hasNr = Number.isFinite(nrPci) || Number.isFinite(nrChannel);
+        let rat;
+        let type;
+        if (role.includes('PSCELL')) {
+            rat = 'NR'; type = 'PSCell';
+        } else if (role.includes('SPCELL')) {
+            rat = 'NR'; type = 'SpCell';
+        } else if (role.includes('NR PCELL') || role.includes('NR SERVING')) {
+            rat = 'NR'; type = 'PSCell';
+        } else if (role.includes('SCG SCELL') || role.includes('NR SCELL')) {
+            rat = 'NR';
+            const number = (role.match(/(?:NR\s+)?(?:SCG\s+)?SCELL\s*(\d+)/) || [])[1] || '?';
+            type = `SCell ${number}`;
+        } else if (role.includes('LTE SCELL') || role.startsWith('SCELL')) {
+            rat = 'LTE';
+            const number = (role.match(/(?:LTE\s+)?SCELL\s*(\d+)/) || [])[1] || '?';
+            type = `SCell ${number}`;
+        } else if (hasNr && !hasLte) {
+            // NSA Benchmark exports sometimes call the PSCell simply PCell.
+            rat = 'NR'; type = 'PSCell';
+        } else {
+            // LTE Serving / PCell, and the MCG side of an EN-DC snapshot.
+            rat = 'LTE'; type = 'PCell';
+        }
+        const pci = rat === 'NR' ? nrPci : ltePci;
+        const channel = rat === 'NR' ? nrChannel : lteChannel;
+        if (!Number.isFinite(pci) && !Number.isFinite(channel)) return null;
+        return {
+            technology: rat,
+            type,
+            pci: Number.isFinite(pci) ? Math.trunc(pci) : null,
+            channel: Number.isFinite(channel) ? Math.trunc(channel) : null,
+            band
+        };
+    },
+
+    // Keep the vendor-provided band whenever it is present. The fallback is
+    // deliberately conservative: it only fills a missing serving-band metric
+    // and never replaces the PSCell/PCell role selected from the source.
+    _displayServingBand(technology, rawBand, channel) {
+        const raw = String(rawBand || '').trim();
+        const rat = String(technology || '').toUpperCase();
+        // Keep Bxx on the canonical component for technical matching, but
+        // expose user-facing LTE metrics as frequency-layer labels.
+        const lteDisplayBand = (band) => ({
+            1: 'L2100', 2: 'L1900', 3: 'L1800', 4: 'L1700/AWS',
+            5: 'L850', 7: 'L2600', 8: 'L900', 20: 'L800',
+            28: 'L700', 38: 'L2600-TDD', 40: 'L2300-TDD', 41: 'L2500-TDD'
+        })[Number(band)] || `B${Number(band)}`;
+        const nrDisplayBand = (band) => ({
+            1: 'n1 NR2100', 3: 'n3 NR1800', 7: 'n7 NR2600',
+            8: 'n8 NR900', 20: 'n20 NR800', 28: 'n28 NR700',
+            38: 'n38 NR2600-TDD', 40: 'n40 NR2300-TDD',
+            41: 'n41 NR2500-TDD', 77: 'n77 C-Band', 78: 'n78 C-Band'
+        })[Number(band)] || `n${Number(band)}`;
+        if (raw) {
+            const nrMatch = raw.match(/\bn\s*(\d{1,3})\b/i);
+            if (nrMatch) return nrDisplayBand(nrMatch[1]);
+            const lteMatch = raw.match(/\b(?:band|b)\s*(\d{1,3})\b/i) || raw.match(/^(\d{1,3})$/);
+            if (lteMatch && rat === 'LTE') return lteDisplayBand(lteMatch[1]);
+            return raw;
+        }
+
+        const value = Number(channel);
+        if (!Number.isFinite(value)) return null;
+        if (rat === 'NR') {
+            // n20/n28 overlap is deliberately reported as ambiguous if the
+            // source did not explicitly provide a band.
+            if (value >= 422000 && value <= 434000) return nrDisplayBand(1);
+            if (value >= 361000 && value <= 376000) return nrDisplayBand(3);
+            if (value >= 524000 && value <= 538000) return nrDisplayBand(7);
+            if (value >= 151600 && value < 158200) return nrDisplayBand(28);
+            if (value >= 158200 && value <= 160600) return `${nrDisplayBand(28)} / ${nrDisplayBand(20)}`;
+            if (value > 160600 && value <= 164200) return nrDisplayBand(20);
+            if (value >= 620000 && value <= 680000) return nrDisplayBand(78);
+            return null;
+        }
+        if (rat === 'LTE') {
+            const ranges = [
+                [0, 599, 1], [600, 1199, 2], [1200, 1949, 3],
+                [1950, 2399, 4], [2400, 2649, 5], [2750, 3449, 7],
+                [3450, 3799, 8], [6150, 6449, 20], [9210, 9659, 28],
+                [37750, 38249, 38], [38650, 39649, 40], [39650, 41589, 41]
+            ];
+            const match = ranges.find(([lo, hi]) => value >= lo && value <= hi);
+            return match ? lteDisplayBand(match[2]) : null;
+        }
+        return null;
+    },
+
+    _mergeCanonicalComponent(point, candidate) {
+        if (!candidate) return;
+        const components = point.__benchmarkComponents || (point.__benchmarkComponents = []);
+        // A repeated incomplete source row fills the same logical component;
+        // a changed PCI/channel remains distinct evidence, never overwriting
+        // the serving identity selected by the canonical primary role.
+        const existing = components.find(component =>
+            component.technology === candidate.technology && component.type === candidate.type &&
+            (component.pci == null || candidate.pci == null || component.pci === candidate.pci) &&
+            (component.channel == null || candidate.channel == null || component.channel === candidate.channel)
+        );
+        if (existing) {
+            if (existing.pci == null) existing.pci = candidate.pci;
+            if (existing.channel == null) existing.channel = candidate.channel;
+            if (!existing.band && candidate.band) existing.band = candidate.band;
+            if (candidate.measurementReference && candidate.measurementReference !== 'UNKNOWN')
+                existing.measurementReference = candidate.measurementReference;
+            if (candidate.frequencyReference) existing.frequencyReference = candidate.frequencyReference;
+            if (candidate.ssbIndex != null) existing.ssbIndex = candidate.ssbIndex;
+        } else {
+            components.push(candidate);
+        }
+    },
+
+    _componentTypeFromMetricRole(rawRole, technology) {
+        const role = String(rawRole || '').trim().toUpperCase();
+        if (!role) return null;
+        const isNr = String(technology || '').toUpperCase() === 'NR';
+        if (isNr && /(?:PSCELL|SPCELL|NR\s+PCELL|NR\s+SERVING)/.test(role)) return 'PSCell';
+        if (!isNr && /(?:^|\s)(?:SERVING|PCELL)(?:\s|$)/.test(role)) return 'PCell';
+        const sCell = role.match(/SCELL\s*(\d+)/);
+        return sCell ? `SCell ${sCell[1]}` : null;
+    },
+
+    _componentMetricKey(technology, type) {
+        return `${String(technology || '').toUpperCase()}:${String(type || '').toUpperCase()}`;
+    },
+
+    _mergeComponentMetric(point, technology, rawRole, values) {
+        const type = this._componentTypeFromMetricRole(rawRole, technology);
+        if (!type) return;
+        const rsrp = this._number(values && values.rsrp);
+        const rsrq = this._number(values && values.rsrq);
+        const sinr = this._number(values && values.sinr);
+        if (![rsrp, rsrq, sinr].some(Number.isFinite)) return;
+        const metrics = point.__benchmarkComponentMetrics || (point.__benchmarkComponentMetrics = new Map());
+        const key = this._componentMetricKey(technology, type);
+        const current = metrics.get(key) || { rsrp: null, rsrq: null, sinr: null };
+        // A Benchmark timestamp commonly emits one line per KPI.  Accumulate
+        // those lines on the same logical component; never copy a PCell value
+        // to an SCell.
+        if (Number.isFinite(rsrp)) current.rsrp = rsrp;
+        if (Number.isFinite(rsrq)) current.rsrq = rsrq;
+        if (Number.isFinite(sinr)) current.sinr = sinr;
+        metrics.set(key, current);
+    },
+
+    // The compact Nemo export has two repeated RF column groups. In the NR
+    // group Cell type precedes RSRP; in the LTE group RSRP precedes Cell type.
+    // Identify the groups by their local header shape, never by a global
+    // column-number threshold or the first occurrence of "RSRP".
+    _neighborLayoutFor(header) {
+        const names = header.map(name => this._normalizedHeader(name));
+        const after = (label, start, limit = 12) => {
+            for (let i = start + 1; i < Math.min(names.length, start + limit + 1); i++) {
+                if (names[i] === label) return i;
+            }
+            return -1;
+        };
+        let nrArfcn = names.indexOf('nr-arfcn');
+        if (nrArfcn < 0) return null;
+        let nrPci = after('pci', nrArfcn, 3);
+        let nrBeam = after('bi', nrPci, 3);
+        let nrRole = after('cell type', nrPci, 10);
+        let nrRsrp = after('rsrp', nrRole, 3);
+        let nrRsrq = after('rsrq', nrRsrp, 3);
+        let nrSinr = after('sinr', nrRsrq, 4);
+        let schema = 'nemo-benchmark-neighbors-tab-v2';
+        if ([nrPci, nrBeam, nrRole, nrRsrp, nrRsrq, nrSinr].some(index => index < 0)) {
+            // Export EMA places NR-ARFCN between the NR RSRQ and SINR
+            // columns, and contains measured roles rather than inventory rows.
+            nrRole = names.indexOf('cell type');
+            nrRsrp = after('rsrp', nrRole, 2);
+            nrRsrq = after('rsrq', nrRsrp, 4);
+            nrArfcn = after('nr-arfcn', nrRsrq, 3);
+            nrSinr = after('sinr', nrArfcn, 2);
+            nrPci = names.lastIndexOf('pci', nrRole);
+            nrBeam = after('bi', nrPci, 2);
+            if (nrPci < 0 || nrRole - nrPci > 12 || nrBeam >= nrRole) return null;
+            schema = 'nemo-benchmark-neighbors-tab-v3';
+        }
+        const lteChannel = after('ch', nrSinr, 3);
+        const ltePci = after('pci', lteChannel, 2);
+        const lteRsrp = after('rsrp', ltePci, 2);
+        const lteRole = after('cell type', lteRsrp, 2);
+        const lteRsrq = after('rsrq', lteRole, 2);
+        const lteSinr = after('sinr', lteRsrq, 2);
+        if ([nrPci, nrBeam, nrRole, nrRsrp, nrRsrq, nrSinr, lteChannel,
+            ltePci, lteRsrp, lteRole, lteRsrq, lteSinr].some(index => index < 0)) return null;
+        const inventoryNrBwp = names.indexOf('nr bwp channel number');
+        return { schema, nrArfcn, nrPci, nrBeam, nrRole, nrRsrp, nrRsrq, nrSinr,
+            lteChannel, ltePci, lteRsrp, lteRole, lteRsrq, lteSinr,
+            inventoryNrBwp, radioMetricIndexes: new Set([
+                nrRsrp, nrRsrq, nrSinr, lteRsrp, lteRsrq, lteSinr
+            ]) };
+    },
+
+    _neighborLayoutRole(rat, raw) {
+        const role = String(raw || '').trim().toUpperCase();
+        if (!role) return null;
+        if (rat === 'NR') {
+            if (/PSCELL|SPCELL|NR\s+PCELL|NR\s+SERVING/.test(role)) return 'PSCell';
+            const scell = role.match(/SCELL\s*(\d+)/);
+            if (scell) return `SCell ${scell[1]}`;
+        } else {
+            if (/(?:^|\s)(?:SERVING|PCELL)(?:\s|$)/.test(role)) return 'PCell';
+            const scell = role.match(/SCELL\s*(\d+)/);
+            if (scell) return `SCell ${scell[1]}`;
+        }
+        if (/DETECTED/.test(role)) return 'Detected';
+        if (/LISTED/.test(role)) return 'Listed';
+        return null;
+    },
+
+    _consumeNeighborLayoutRow(state, point, values) {
+        const layout = state.neighborLayout;
+        const cleanBand = raw => {
+            const value = String(raw || '').trim();
+            return value && value.toLowerCase() !== 'undefined' ? value : null;
+        };
+        const inventoryRole = String(values[state.indexes.cellType] || '').trim();
+        if (inventoryRole) {
+            const rat = /^NR\b/i.test(inventoryRole) ? 'NR' : /^LTE\b/i.test(inventoryRole) ? 'LTE' : null;
+            if (rat) {
+                const pci = this._number(values[rat === 'NR' ? state.indexes.nrPci : state.indexes.ltePci]);
+                const channel = this._number(rat === 'NR'
+                    ? (values[state.indexes.nrChannel] || values[layout.inventoryNrBwp])
+                    : values[state.indexes.lteChannel]);
+                const role = this._neighborLayoutRole(rat, inventoryRole);
+                if (Number.isFinite(pci) && Number.isFinite(channel) && role) {
+                    const key = `${rat}|${Math.trunc(channel)}|${Math.trunc(pci)}`;
+                    const inventory = point.__benchmarkInventory || (point.__benchmarkInventory = new Map());
+                    const prior = inventory.get(key);
+                    const band = cleanBand(values[state.indexes.band]);
+                    const active = /^(?:PCell|PSCell|SCell\s+\d+)$/i.test(role);
+                    if (!prior || active || !/^(?:PCell|PSCell|SCell\s+\d+)$/i.test(prior.role))
+                        inventory.set(key, { rat, pci: Math.trunc(pci), channel: Math.trunc(channel), role,
+                            band: band || prior?.band || null });
+                    if (active) this._mergeCanonicalComponent(point, {
+                        technology: rat, type: role, pci: Math.trunc(pci),
+                        channel: Math.trunc(channel), band,
+                    });
+                }
+            }
+        }
+        for (const rat of ['NR', 'LTE']) {
+            const isNr = rat === 'NR';
+            const channel = this._number(values[isNr ? layout.nrArfcn : layout.lteChannel]);
+            const pci = this._number(values[isNr ? layout.nrPci : layout.ltePci]);
+            if (!Number.isFinite(channel) || !Number.isFinite(pci)) continue;
+            const rsrp = this._number(values[isNr ? layout.nrRsrp : layout.lteRsrp]);
+            const rsrq = this._number(values[isNr ? layout.nrRsrq : layout.lteRsrq]);
+            const sinr = this._number(values[isNr ? layout.nrSinr : layout.lteSinr]);
+            if (![rsrp, rsrq, sinr].some(Number.isFinite)) continue;
+            const beam = isNr ? String(values[layout.nrBeam] || '').trim() : '';
+            const key = `${rat}|${Math.trunc(channel)}|${Math.trunc(pci)}|${beam}`;
+            const cells = point.__benchmarkMeasuredCells || (point.__benchmarkMeasuredCells = new Map());
+            const cell = cells.get(key) || { rat, channel: Math.trunc(channel), pci: Math.trunc(pci),
+                beam, roles: new Set(), rsrp: null, rsrq: null, sinr: null, band: null };
+            const role = this._neighborLayoutRole(rat, values[isNr ? layout.nrRole : layout.lteRole]);
+            if (role) cell.roles.add(role);
+            if (Number.isFinite(rsrp)) cell.rsrp = rsrp;
+            if (Number.isFinite(rsrq)) cell.rsrq = rsrq;
+            if (Number.isFinite(sinr)) cell.sinr = sinr;
+            const band = cleanBand(values[state.indexes.band]);
+            if (band) cell.band = band;
+            cells.set(key, cell);
+        }
+        for (const spec of state.metricSpecs) {
+            if (layout.radioMetricIndexes.has(spec.index)) continue;
+            const value = this._number(values[spec.index]);
+            if (value === null) continue;
+            point[spec.name] = value;
+            point.properties[spec.name] = value;
+            state.metricNames.add(spec.name);
+            if (spec.isMos && !state.mosMetric) state.mosMetric = spec.name;
+        }
+    },
+
+    _primaryCandidatesFor(point) {
+        const byRat = { LTE: new Map(), NR: new Map() };
+        const measured = point.__benchmarkMeasuredCells || new Map();
+        measured.forEach(cell => {
+            const role = cell.rat === 'NR' ? 'PSCell' : 'PCell';
+            if (!cell.roles.has(role)) return;
+            const key = `${cell.rat}|${cell.channel}|${cell.pci}`;
+            const current = byRat[cell.rat].get(key);
+            const rsrp = Number.isFinite(cell.rsrp) ? cell.rsrp : null;
+            if (!current || (rsrp !== null && (current.rsrp === null || rsrp > current.rsrp))) {
+                byRat[cell.rat].set(key, { key, rat: cell.rat, channel: cell.channel,
+                    pci: cell.pci, rsrp });
+            }
+        });
+        const inventory = point.__benchmarkInventory || new Map();
+        const hasMeasuredPrimary = { LTE: byRat.LTE.size > 0, NR: byRat.NR.size > 0 };
+        inventory.forEach((item, key) => {
+            const role = item.rat === 'NR' ? 'PSCell' : 'PCell';
+            if (hasMeasuredPrimary[item.rat] || item.role !== role) return;
+            byRat[item.rat].set(key, { key, rat: item.rat, channel: item.channel,
+                pci: item.pci, rsrp: null });
+        });
+        return { LTE: [...byRat.LTE.values()], NR: [...byRat.NR.values()] };
+    },
+
+    _resolveAmbiguousPrimaryTimestamps(state, toTimestamp, distanceMeters) {
+        const entries = [...state.snapshots.values()]
+            .map(point => ({ point, ms: toTimestamp(point.time), candidates: this._primaryCandidatesFor(point) }))
+            .filter(entry => Number.isFinite(entry.ms))
+            .sort((a, b) => a.ms - b.ms);
+        entries.forEach((entry, index) => {
+            const ambiguousRats = ['LTE', 'NR'].filter(rat => entry.candidates[rat].length > 1);
+            if (!ambiguousRats.length) return;
+            state.ambiguousPrimaryTimestamps = (state.ambiguousPrimaryTimestamps || 0) + 1;
+            const selections = {};
+            const nearby = (rat, direction) => {
+                for (let cursor = index + direction; cursor >= 0 && cursor < entries.length; cursor += direction) {
+                    const other = entries[cursor];
+                    if (Math.abs(other.ms - entry.ms) > 1500) break;
+                    if (entry.point.lat !== null && entry.point.lng !== null &&
+                        other.point.lat !== null && other.point.lng !== null &&
+                        distanceMeters(entry.point, other.point) > 100) continue;
+                    if (other.candidates[rat].length === 1) return other.candidates[rat][0];
+                }
+                return null;
+            };
+            for (const rat of ambiguousRats) {
+                const candidates = entry.candidates[rat];
+                const prior = nearby(rat, -1);
+                const following = nearby(rat, 1);
+                const followingMatch = following && candidates.find(candidate => candidate.key === following.key);
+                const ranked = candidates.filter(candidate => Number.isFinite(candidate.rsrp) &&
+                    candidate.rsrp >= -140 && candidate.rsrp <= -20)
+                    .sort((a, b) => b.rsrp - a.rsrp);
+                const dominantMarginDb = ranked.length >= 2 ? ranked[0].rsrp - ranked[1].rsrp : null;
+                const chosen = followingMatch ||
+                    (ranked.length === candidates.length && dominantMarginDb >= 6 ? ranked[0] : null);
+                if (!chosen) continue;
+                const method = followingMatch ? 'temporal_continuity' : 'dominant_rsrp';
+                const otherRsrp = Math.max(...ranked.filter(candidate => candidate.key !== chosen.key)
+                    .map(candidate => candidate.rsrp));
+                const marginDb = Number.isFinite(chosen.rsrp) && Number.isFinite(otherRsrp)
+                    ? chosen.rsrp - otherRsrp : null;
+                selections[rat] = { key: chosen.key, rat, pci: chosen.pci,
+                    channel: chosen.channel, method, marginDb,
+                    priorMatches: prior?.key === chosen.key,
+                    followingMatches: following?.key === chosen.key };
+            }
+            if (Object.keys(selections).length !== ambiguousRats.length) {
+                entry.point.__benchmarkAmbiguousPrimary = true;
+                state.unresolvedPrimaryTimestamps = (state.unresolvedPrimaryTimestamps || 0) + 1;
+                return;
+            }
+            entry.point.__benchmarkPrimarySelection = selections;
+            entry.point.parsed.primaryCandidates = ambiguousRats.flatMap(rat =>
+                entry.candidates[rat].map(candidate => ({ rat, pci: candidate.pci,
+                    channel: candidate.channel, rsrp: candidate.rsrp,
+                    selected: candidate.key === selections[rat].key })));
+            entry.point.parsed.servingSelection = Object.fromEntries(ambiguousRats.map(rat =>
+                [rat, { ...selections[rat], inferred: true }]));
+            entry.point.properties['Serving selection'] = ambiguousRats.map(rat =>
+                `${rat} PCI ${selections[rat].pci} / ${selections[rat].channel} (${selections[rat].method})`).join('; ');
+            state.resolvedPrimaryTimestamps = (state.resolvedPrimaryTimestamps || 0) + 1;
+            if (ambiguousRats.some(rat => selections[rat].method === 'dominant_rsrp')) {
+                state.resolvedPrimaryByRsrp = (state.resolvedPrimaryByRsrp || 0) + 1;
+            }
+        });
+    },
+
+    _materializeNeighborLayoutPoint(state, point) {
+        if (point.__benchmarkAmbiguousPrimary) return;
+        const inventory = point.__benchmarkInventory || new Map();
+        const measured = point.__benchmarkMeasuredCells || new Map();
+        const candidates = this._primaryCandidatesFor(point);
+        const selectedKey = {};
+        for (const rat of ['LTE', 'NR']) {
+            selectedKey[rat] = point.__benchmarkPrimarySelection?.[rat]?.key ||
+                (candidates[rat].length === 1 ? candidates[rat][0].key : null);
+        }
+        if (['LTE', 'NR'].some(rat => candidates[rat].length > 1 && !selectedKey[rat])) {
+            point.__benchmarkAmbiguousPrimary = true;
+            delete point.__benchmarkInventory;
+            delete point.__benchmarkMeasuredCells;
+            return;
+        }
+        if (Array.isArray(point.__benchmarkComponents)) {
+            point.__benchmarkComponents = point.__benchmarkComponents.filter(component => {
+                const rat = component.technology;
+                const primary = rat === 'NR' ? /^(?:PSCell|SpCell)$/i.test(component.type)
+                    : rat === 'LTE' && /^PCell$/i.test(component.type);
+                return !primary || !selectedKey[rat] ||
+                    `${rat}|${component.channel}|${component.pci}` === selectedKey[rat];
+            });
+        }
+        const byCell = new Map();
+        measured.forEach(cell => {
+            const key = `${cell.rat}|${cell.channel}|${cell.pci}`;
+            if (!byCell.has(key)) byCell.set(key, []);
+            byCell.get(key).push(cell);
+        });
+        const componentMetrics = point.__benchmarkComponentByIdentity ||
+            (point.__benchmarkComponentByIdentity = new Map());
+        byCell.forEach((beams, key) => {
+            const inv = inventory.get(key);
+            const roles = new Set(beams.flatMap(cell => [...cell.roles]));
+            const role = inv && /^(?:PCell|PSCell|SCell\s+\d+)$/i.test(inv.role)
+                ? inv.role : ['PSCell', 'PCell', ...[...roles].filter(value => /^SCell\s+\d+$/i.test(value)),
+                    'Detected', 'Listed'].find(value => roles.has(value)) || inv?.role || null;
+            const roleBeams = beams.filter(cell => cell.roles.has(role));
+            const activeRole = /^(?:PCell|PSCell|SCell\s+\d+)$/i.test(role || '');
+            // A detected beam with the same PCI/ARFCN is not evidence for an
+            // active leg unless the measurement itself carries that role.
+            const pool = roleBeams.length ? roleBeams : activeRole ? [] : beams;
+            if (!pool.length) return;
+            const chosen = pool.slice().sort((a, b) =>
+                (Number.isFinite(b.rsrp) ? b.rsrp : -Infinity) -
+                (Number.isFinite(a.rsrp) ? a.rsrp : -Infinity))[0];
+            const band = inv?.band || chosen.band || null;
+            if (activeRole) {
+                if ((role === 'PCell' || role === 'PSCell') && selectedKey[chosen.rat] &&
+                    key !== selectedKey[chosen.rat]) return;
+                this._mergeCanonicalComponent(point, { technology: chosen.rat, type: role,
+                    pci: chosen.pci, channel: chosen.channel, band,
+                    measurementReference: chosen.rat === 'NR' && chosen.beam ? 'SS_RSRP' : 'UNKNOWN',
+                    frequencyReference: chosen.rat === 'NR' ? 'CARRIER_ARFCN' : 'EARFCN',
+                    ssbIndex: chosen.rat === 'NR' ? this._number(chosen.beam) : null });
+                componentMetrics.set(`${chosen.rat}|${role}|${chosen.channel}|${chosen.pci}`,
+                    { rsrp: chosen.rsrp, rsrq: chosen.rsrq, sinr: chosen.sinr });
+                const isPrimary = role === 'PCell' || role === 'PSCell';
+                if (isPrimary) {
+                    if (chosen.rat === 'NR') point.parsed.nrMeasurementReference = chosen.beam ? 'SS_RSRP' : 'UNKNOWN';
+                    const prefix = chosen.rat === 'NR' ? '5G' : '4G';
+                    for (const [metric, value] of [['RSRP', chosen.rsrp], ['RSRQ', chosen.rsrq], ['SINR', chosen.sinr]]) {
+                        if (!Number.isFinite(value)) continue;
+                        const label = `${prefix} ${metric}`;
+                        point[label] = value;
+                        point.properties[label] = value;
+                        state.metricNames.add(label);
+                    }
+                }
+            } else if ((role === 'Detected' || role === 'Listed') &&
+                [chosen.rsrp, chosen.rsrq, chosen.sinr].some(Number.isFinite)) {
+                point.parsed.neighbors.push({ rat: chosen.rat, pci: chosen.pci, sc: chosen.pci,
+                    ...(chosen.rat === 'NR' ? { nrarfcn: chosen.channel } : { earfcn: chosen.channel }),
+                    freq: chosen.channel, band, beam: chosen.beam || null,
+                    measurementReference: chosen.rat === 'NR' && chosen.beam ? 'SS_RSRP' : 'UNKNOWN',
+                    frequencyReference: chosen.rat === 'NR' ? 'CARRIER_ARFCN' : 'EARFCN',
+                    ssbIndex: chosen.rat === 'NR' ? this._number(chosen.beam) : null,
+                    rsrp: chosen.rsrp, rscp: chosen.rsrp, rsrq: chosen.rsrq,
+                    ecno: chosen.rsrq, sinr: chosen.sinr,
+                    source_kind: 'measured_txt', type: role,
+                });
+            }
+        });
+        delete point.__benchmarkInventory;
+        delete point.__benchmarkMeasuredCells;
+    },
+
+    _consumeLine(state, rawLine) {
+        const line = String(rawLine || '').replace(/\r$/, '');
+        if (!line) return;
+        state.lineCount += 1;
+        const values = line.split('\t');
+        if (!state.header) {
+            state.header = values.map(value => String(value || '').trim().replace(/^\uFEFF/, ''));
+            state.header.forEach((name, index) => {
+                const normalized = this._normalizedHeader(name);
+                if (state.indexes.time === undefined && normalized === 'time') state.indexes.time = index;
+                if (state.indexes.lng === undefined && /^(lon\.?|longitude)$/.test(normalized)) state.indexes.lng = index;
+                if (state.indexes.lat === undefined && /^(lat\.?|latitude)$/.test(normalized)) state.indexes.lat = index;
+                if (state.indexes.lteChannel === undefined && normalized === 'lte channel number') state.indexes.lteChannel = index;
+                if (state.indexes.ltePci === undefined && normalized === 'lte pci') state.indexes.ltePci = index;
+                if (state.indexes.nrChannel === undefined && (normalized === 'nr channel number' || normalized === 'nr-arfcn')) state.indexes.nrChannel = index;
+                if (state.indexes.nrPci === undefined && normalized === 'nr pci') state.indexes.nrPci = index;
+                if (state.indexes.cellType === undefined && normalized === 'cell type') state.indexes.cellType = index;
+                if (state.indexes.band === undefined && normalized === 'band') state.indexes.band = index;
+                const isUsefulKpi = /(?:\bmos\b|throughput|\brate\b|bler|packet\s*loss|\bcqi\b|\bri\b|\bprb\b|retransmission|\brtt\b|latency|rsrp|rsrq|sinr|ss-rsrp|ss-rsrq|ss-sinr|pusch|pdsch)/i.test(name);
+                if (isUsefulKpi) {
+                    const displayName = this._displayMetric(name, index);
+                    state.metricSpecs.push({ index, name: displayName,
+                        radioRole: /^5G (?:RSRP|RSRQ|SINR)$/i.test(displayName) ? 'NR' :
+                            /^4G (?:RSRP|RSRQ|SINR)$/i.test(displayName) ? 'LTE' : null,
+                        isMos: /\bmos\b/i.test(displayName) });
+                }
+            });
+            // The Benchmark export repeats "Cell type" for several record
+            // families.  The two blocks followed by RSRP/RSRQ/SINR are the
+            // per-component NR and LTE radio measurements.  Discover their
+            // offsets from the header instead of relying on fixed columns.
+            const metricBlocks = state.header.reduce((blocks, name, index) => {
+                if (this._normalizedHeader(name) !== 'cell type') return blocks;
+                const end = Math.min(state.header.length, index + 9);
+                const findAhead = label => {
+                    for (let cursor = index + 1; cursor < end; cursor += 1) {
+                        if (this._normalizedHeader(state.header[cursor]) === label) return cursor;
+                    }
+                    return -1;
+                };
+                const rsrp = findAhead('rsrp');
+                const rsrq = findAhead('rsrq');
+                const sinr = findAhead('sinr');
+                if (rsrp >= 0 && rsrq >= 0 && sinr >= 0) {
+                    blocks.push({ role: index, rsrp, rsrq, sinr });
+                }
+                return blocks;
+            }, []);
+            state.indexes.nrComponentMetricBlock = metricBlocks.find(block => block.role < 150) || null;
+            state.indexes.lteComponentMetricBlock = metricBlocks.find(block => block.role >= 150) || null;
+            state.neighborLayout = this._neighborLayoutFor(state.header);
+            return;
+        }
+
+        const time = String(values[state.indexes.time] || '').trim() || 'N/A';
+        // Radio and application samples may omit GPS even though another row
+        // for the exact same timestamp carries it.  Aggregate first by time,
+        // then attach the valid coordinate when it is encountered.
+        let point = state.snapshots.get(time);
+        if (!point) {
+            point = {
+                id: state.snapshots.size,
+                lat: null,
+                lng: null,
+                time,
+                type: 'MEASUREMENT',
+                tech: '4G/5G Benchmark TXT',
+                level: null,
+                rsrp: null,
+                rsrq: null,
+                sinr: null,
+                ecno: null,
+                parsed: { serving: null, neighbors: [] },
+                properties: {}
+            };
+            state.snapshots.set(time, point);
+        }
+
+        const lat = this._number(values[state.indexes.lat]);
+        const lng = this._number(values[state.indexes.lng]);
+        if (lat !== null || lng !== null) state.gpsRows += 1;
+        if (this._validCoordinate(lat, lng)) {
+            point.lat = lat;
+            point.lng = lng;
+            state.validGpsRows += 1;
+        }
+
+        if (state.neighborLayout) {
+            this._consumeNeighborLayoutRow(state, point, values);
+            return;
+        }
+
+        const nrComponentMetricBlock = state.indexes.nrComponentMetricBlock;
+        const lteComponentMetricBlock = state.indexes.lteComponentMetricBlock;
+        const nrMeasurementRole = nrComponentMetricBlock
+            ? values[nrComponentMetricBlock.role]
+            : '';
+        const lteMeasurementRole = lteComponentMetricBlock
+            ? values[lteComponentMetricBlock.role]
+            : '';
+        if (nrMeasurementRole) this._mergeComponentMetric(point, 'NR', nrMeasurementRole, {
+            rsrp: values[nrComponentMetricBlock.rsrp],
+            rsrq: values[nrComponentMetricBlock.rsrq],
+            sinr: values[nrComponentMetricBlock.sinr]
+        });
+        if (lteMeasurementRole) this._mergeComponentMetric(point, 'LTE', lteMeasurementRole, {
+            rsrp: values[lteComponentMetricBlock.rsrp],
+            rsrq: values[lteComponentMetricBlock.rsrq],
+            sinr: values[lteComponentMetricBlock.sinr]
+        });
+
+        const allowNrRadioMetric = !nrMeasurementRole || /(?:Serving|PSCell)/i.test(nrMeasurementRole);
+        const allowLteRadioMetric = !lteMeasurementRole || /(?:Serving|PCell)/i.test(lteMeasurementRole);
+        for (const spec of state.metricSpecs) {
+            if (spec.radioRole === 'NR' && !allowNrRadioMetric) continue;
+            if (spec.radioRole === 'LTE' && !allowLteRadioMetric) continue;
+            const raw = values[spec.index];
+            if (raw === undefined || raw === null || raw === '') continue;
+            const n = this._number(raw);
+            if (n === null) continue;
+            // A timestamp can carry the same KPI in more than one physical
+            // sample. Keep the last reported value, not a synthetic average.
+            point[spec.name] = n;
+            point.properties[spec.name] = n;
+            state.metricNames.add(spec.name);
+            if (spec.isMos && !state.mosMetric) state.mosMetric = spec.name;
+        }
+
+        const lteRsrp = point['4G RSRP'];
+        const lteRsrq = point['4G RSRQ'];
+        const lteSinr = point['4G SINR'];
+        const nrRsrp = point['5G RSRP'];
+        const nrRsrq = point['5G RSRQ'];
+        const nrSinr = point['5G SINR'];
+        // When a NR PSCell is present, the generic Serving KPI represents the
+        // 5G serving radio.  LTE values remain explicitly available as 4G
+        // PCell/anchor KPIs instead of silently replacing the NR service.
+        const rsrp = Number.isFinite(nrRsrp) ? nrRsrp : lteRsrp;
+        const rsrq = Number.isFinite(nrRsrq) ? nrRsrq : lteRsrq;
+        const sinr = Number.isFinite(nrSinr) ? nrSinr : lteSinr;
+        if (Number.isFinite(rsrp)) {
+            point.rsrp = point.level = rsrp;
+            point['Serving RSRP'] = rsrp;
+            point.properties['Serving RSRP'] = rsrp;
+            state.metricNames.add('Serving RSRP');
+        }
+        if (Number.isFinite(rsrq)) {
+            point.rsrq = point.ecno = rsrq;
+            point['Serving RSRQ'] = rsrq;
+            point.properties['Serving RSRQ'] = rsrq;
+            state.metricNames.add('Serving RSRQ');
+        }
+        if (Number.isFinite(sinr)) {
+            point.sinr = sinr;
+            point['Serving SINR'] = sinr;
+            point.properties['Serving SINR'] = sinr;
+            state.metricNames.add('Serving SINR');
+        }
+        if (state.mosMetric && Number.isFinite(point[state.mosMetric])) point.mos = point[state.mosMetric];
+
+        // Inventory rows are authoritative.  Keep all active carriers so the
+        // details panel can distinguish true serving legs from LTE/NR SCells.
+        if (values[state.indexes.cellType]) this._mergeCanonicalComponent(point, this._canonicalComponent(values, state.indexes));
+    },
+
+    _finalize(state) {
+        const toTimestamp = value => {
+            const match = String(value || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+            if (!match) return NaN;
+            return Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6], +(match[7] || '0').padEnd(3, '0'));
+        };
+        const distanceMeters = (a, b) => {
+            const latScale = 111320;
+            const lngScale = latScale * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
+            return Math.hypot((a.lat - b.lat) * latScale, (a.lng - b.lng) * lngScale);
+        };
+        if (state.neighborLayout) {
+            this._resolveAmbiguousPrimaryTimestamps(state, toTimestamp, distanceMeters);
+            state.snapshots.forEach(point => this._materializeNeighborLayoutPoint(state, point));
+        }
+        let points = Array.from(state.snapshots.values()).filter(point =>
+            !point.__benchmarkAmbiguousPrimary && this._validCoordinate(point.lat, point.lng) &&
+            (Object.keys(point.properties || {}).length > 0 || point.parsed?.neighbors?.length > 0)
+        );
+        // Materialise both serving legs before context propagation. In EN-DC,
+        // the NR PSCell is the user-facing 5G serving cell; LTE PCell is kept
+        // as its anchor, rather than incorrectly masking NR in Point Details.
+        points.forEach(point => {
+            const components = Array.isArray(point.__benchmarkComponents) ? point.__benchmarkComponents : [];
+            const nrPrimary = components.find(component => component.technology === 'NR' && /^(?:PSCell|SpCell)$/i.test(component.type));
+            const ltePrimary = components.find(component => component.technology === 'LTE' && /^PCell$/i.test(component.type));
+            const enrichServing = (base, isLte) => base ? {
+                ...base,
+                rat: isLte ? 'E-UTRA' : 'NR',
+                sc: base.pci,
+                freq: base.channel,
+                earfcn: isLte ? base.channel : undefined,
+                nrarfcn: isLte ? undefined : base.channel,
+                level: isLte ? point['4G RSRP'] : point['5G RSRP'],
+                ecno: isLte ? point['4G RSRQ'] : point['5G RSRQ'],
+                rsrp: isLte ? point['4G RSRP'] : point['5G RSRP'],
+                rsrq: isLte ? point['4G RSRQ'] : point['5G RSRQ'],
+                sinr: isLte ? point['4G SINR'] : point['5G SINR']
+            } : null;
+            const lteServing = enrichServing(ltePrimary, true);
+            const nrServing = enrichServing(nrPrimary, false);
+            if (lteServing) point.parsed.serving_lte = lteServing;
+            if (nrServing) point.parsed.serving_nr = nrServing;
+            const serving = nrServing || lteServing;
+            if (serving) {
+                point.pci = point.sc = serving.pci;
+                point.freq = serving.freq;
+                point.parsed.serving = serving;
+
+                // These metrics always describe the user-facing serving leg:
+                // NR PSCell in NSA, otherwise LTE PCell. The LTE anchor must
+                // never supply its band/technology to an NR serving point.
+                const servingTechnology = nrServing ? '5G NR' : '4G LTE';
+                const servingBand = this._displayServingBand(
+                    nrServing ? 'NR' : 'LTE',
+                    serving.band,
+                    serving.freq,
+                );
+                point['Serving Technology'] = servingTechnology;
+                point.properties['Serving Technology'] = servingTechnology;
+                state.metricNames.add('Serving Technology');
+                if (servingBand) {
+                    point['Serving Band'] = servingBand;
+                    point.properties['Serving Band'] = servingBand;
+                    state.metricNames.add('Serving Band');
+                }
+
+                // LTE remains an EN-DC anchor only.  Expose its RF context
+                // under explicit anchor labels, never under Serving KPIs.
+                if (nrServing && lteServing) {
+                    const anchorBand = this._displayServingBand(
+                        'LTE',
+                        lteServing.band,
+                        lteServing.earfcn ?? lteServing.freq,
+                    );
+                    const addAnchorMetric = (label, value) => {
+                        if (!Number.isFinite(value)) return;
+                        point[label] = value;
+                        point.properties[label] = value;
+                        state.metricNames.add(label);
+                    };
+                    addAnchorMetric('Anchoring LTE RSRP', lteServing.rsrp);
+                    addAnchorMetric('Anchoring LTE SINR', lteServing.sinr);
+                    if (anchorBand) {
+                        point['Anchoring LTE Band'] = anchorBand;
+                        point.properties['Anchoring LTE Band'] = anchorBand;
+                        state.metricNames.add('Anchoring LTE Band');
+                    }
+                }
+
+                // Canonical "Serving …" KPIs must always describe the
+                // user-facing serving leg.  In EN-DC that is the NR PSCell;
+                // the LTE PCell is its anchor and must never colour a
+                // "Serving SINR/RSRP/RSRQ" map layer.  The raw importer sees
+                // LTE and NR rows independently, so repair any transient
+                // LTE-derived generic value once the canonical roles are
+                // known.
+                const primaryPrefix = nrServing ? '5G' : '4G';
+                const applyPrimaryKpi = (label, pointField, value) => {
+                    if (Number.isFinite(value)) {
+                        point[pointField] = value;
+                        point.properties[label] = value;
+                        point[label] = value;
+                        state.metricNames.add(label);
+                    } else if (nrServing) {
+                        // Do not silently replace a missing NR measurement by
+                        // an LTE-anchor measurement under a Serving label.
+                        point[pointField] = null;
+                        delete point.properties[label];
+                        delete point[label];
+                    }
+                };
+                applyPrimaryKpi('Serving RSRP', 'rsrp', point[`${primaryPrefix} RSRP`]);
+                if (Number.isFinite(point.rsrp)) point.level = point.rsrp;
+                else if (nrServing) point.level = null;
+                applyPrimaryKpi('Serving RSRQ', 'rsrq', point[`${primaryPrefix} RSRQ`]);
+                if (Number.isFinite(point.rsrq)) point.ecno = point.rsrq;
+                else if (nrServing) point.ecno = null;
+                applyPrimaryKpi('Serving SINR', 'sinr', point[`${primaryPrefix} SINR`]);
+            }
+            // Keep the two genuine EN-DC serving legs explicitly.  The Point
+            // Details renderer uses this to show "NR PSCell" and its "LTE
+            // PCell / anchor" as separate rows; neither is a neighbor.
+            const componentRank = component => {
+                if (/^(?:PSCell|SpCell)$/i.test(component.type)) return 0;
+                if (/^PCell$/i.test(component.type)) return 1;
+                return 2;
+            };
+            const componentMetrics = point.__benchmarkComponentMetrics;
+            const measuredMetricsFor = component => {
+                const exact = point.__benchmarkComponentByIdentity;
+                if (exact instanceof Map) {
+                    return exact.get(`${component.technology}|${component.type}|${component.channel}|${component.pci}`) || null;
+                }
+                if (!(componentMetrics instanceof Map)) return null;
+                // Measurement rows identify a component by RAT + role.  If a
+                // malformed export contains two active carriers with the same
+                // role, there is no safe way to choose one: leave both blank
+                // rather than attach an RF value to the wrong SCell.
+                const sameRoleCount = components.filter(other =>
+                    other.technology === component.technology && other.type === component.type
+                ).length;
+                if (sameRoleCount !== 1) return null;
+                return componentMetrics.get(this._componentMetricKey(component.technology, component.type)) || null;
+            };
+            point.__mrdcCells = components
+                .slice()
+                .sort((a, b) => componentRank(a) - componentRank(b) || a.technology.localeCompare(b.technology) || a.type.localeCompare(b.type))
+                .map(component => {
+                    const isLte = component.technology === 'LTE';
+                    const isPrimary = /^(?:PSCell|SpCell|PCell)$/i.test(component.type);
+                    const measured = measuredMetricsFor(component);
+                    const fallbackRsrp = isPrimary ? (isLte ? point['4G RSRP'] : point['5G RSRP']) : null;
+                    const fallbackRsrq = isPrimary ? (isLte ? point['4G RSRQ'] : point['5G RSRQ']) : null;
+                    const fallbackSinr = isPrimary ? (isLte ? point['4G SINR'] : point['5G SINR']) : null;
+                    return {
+                        ...component,
+                        rsrp: Number.isFinite(measured && measured.rsrp) ? measured.rsrp : fallbackRsrp,
+                        rsrq: Number.isFinite(measured && measured.rsrq) ? measured.rsrq : fallbackRsrq,
+                        sinr: Number.isFinite(measured && measured.sinr) ? measured.sinr : fallbackSinr
+                    };
+                });
+            delete point.__benchmarkComponents;
+            delete point.__benchmarkComponentMetrics;
+            delete point.__benchmarkComponentByIdentity;
+        });
+        // Service/application rows (for example PPP rate) are timestamped a
+        // few milliseconds after their radio snapshot.  They are valid DT
+        // points, but have no Cell type of their own.  Carry only the closest
+        // already-observed serving identity for Point Details: RF values are
+        // intentionally not copied or interpolated.
+        let previousRadioPoint = null;
+        points.sort((a, b) => toTimestamp(a.time) - toTimestamp(b.time)).forEach(point => {
+            const serving = point.parsed && point.parsed.serving;
+            if (serving && Number.isFinite(serving.pci)) {
+                previousRadioPoint = point;
+                return;
+            }
+            const elapsed = previousRadioPoint ? toTimestamp(point.time) - toTimestamp(previousRadioPoint.time) : Infinity;
+            if (previousRadioPoint && elapsed >= 0 && elapsed <= 1500 && distanceMeters(point, previousRadioPoint) <= 35) {
+                const source = previousRadioPoint.parsed.serving;
+                point.parsed.serving = { ...source };
+                if (previousRadioPoint.parsed.serving_lte) point.parsed.serving_lte = { ...previousRadioPoint.parsed.serving_lte };
+                if (previousRadioPoint.parsed.serving_nr) point.parsed.serving_nr = { ...previousRadioPoint.parsed.serving_nr };
+                if (Array.isArray(previousRadioPoint.__mrdcCells)) {
+                    point.__mrdcCells = previousRadioPoint.__mrdcCells.map(cell => ({ ...cell }));
+                }
+                point.pci = point.sc = source.pci;
+                point.freq = source.freq;
+                ['Serving Technology', 'Serving Band'].forEach(label => {
+                    const value = previousRadioPoint.properties && previousRadioPoint.properties[label];
+                    if (value === undefined || value === null || value === '') return;
+                    point[label] = value;
+                    point.properties[label] = value;
+                    state.metricNames.add(label);
+                });
+                point.properties['Serving context'] = 'Nearest preceding radio snapshot';
+            }
+        });
+        // GPS is often refreshed more slowly than the radio sampler.  Without
+        // this reduction, three samples at the exact same physical location
+        // become three overlapping map points with different instantaneous
+        // RSRP values.  Collapse only a short continuous run with the *same*
+        // serving RAT/PCI/frequency. A handover is therefore never hidden.
+        const sameServing = (a, b) => {
+            const sa = a && a.parsed && a.parsed.serving;
+            const sb = b && b.parsed && b.parsed.serving;
+            if (!sa || !sb) return false;
+            return String(sa.rat || '') === String(sb.rat || '') &&
+                Number(sa.pci ?? sa.sc) === Number(sb.pci ?? sb.sc) &&
+                Number(sa.freq ?? sa.earfcn ?? sa.nrarfcn) === Number(sb.freq ?? sb.earfcn ?? sb.nrarfcn);
+        };
+        const sameNeighborSet = (a, b) => {
+            const keys = point => (point?.parsed?.neighbors || [])
+                .map(neighbor => `${neighbor.rat}|${neighbor.freq}|${neighbor.pci}`)
+                .sort().join(';');
+            return keys(a) === keys(b);
+        };
+        const median = (values) => {
+            const ordered = values.slice().sort((a, b) => a - b);
+            const middle = Math.floor(ordered.length / 2);
+            return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+        };
+        const merged = [];
+        let group = [];
+        let groupStartMs = NaN;
+        const flushGroup = () => {
+            if (!group.length) return;
+            const representative = group[group.length - 1];
+            if (group.length > 1) {
+                if (state.neighborLayout) {
+                    const neighborsByCell = new Map();
+                    group.forEach(sample => (sample.parsed?.neighbors || []).forEach(neighbor => {
+                        const key = `${neighbor.rat}|${neighbor.freq}|${neighbor.pci}`;
+                        const entry = neighborsByCell.get(key) || {
+                            latest: neighbor, rsrp: [], rsrq: [], sinr: []
+                        };
+                        entry.latest = neighbor;
+                        for (const metric of ['rsrp', 'rsrq', 'sinr']) {
+                            if (Number.isFinite(neighbor[metric])) entry[metric].push(neighbor[metric]);
+                        }
+                        neighborsByCell.set(key, entry);
+                    }));
+                    representative.parsed.neighbors = [...neighborsByCell.values()].map(entry => {
+                        const rsrp = entry.rsrp.length ? median(entry.rsrp) : null;
+                        const rsrq = entry.rsrq.length ? median(entry.rsrq) : null;
+                        const sinr = entry.sinr.length ? median(entry.sinr) : null;
+                        return { ...entry.latest, rsrp, rscp: rsrp, rsrq, ecno: rsrq, sinr };
+                    });
+                }
+                const numericMetricKeys = new Set();
+                group.forEach(sample => Object.keys(sample.properties || {}).forEach(key => {
+                    if (Number.isFinite(Number(sample.properties[key]))) numericMetricKeys.add(key);
+                }));
+                numericMetricKeys.forEach(key => {
+                    const values = group
+                        .map(sample => Number(sample.properties && sample.properties[key]))
+                        .filter(Number.isFinite);
+                    if (!values.length) return;
+                    const value = median(values);
+                    representative[key] = value;
+                    representative.properties[key] = value;
+                });
+                const applyRfMedian = (serving, prefix) => {
+                    if (!serving) return;
+                    const rsrp = representative[`${prefix} RSRP`];
+                    const rsrq = representative[`${prefix} RSRQ`];
+                    const sinr = representative[`${prefix} SINR`];
+                    if (Number.isFinite(rsrp)) serving.rsrp = serving.level = rsrp;
+                    if (Number.isFinite(rsrq)) serving.rsrq = serving.ecno = rsrq;
+                    if (Number.isFinite(sinr)) serving.sinr = sinr;
+                };
+                applyRfMedian(representative.parsed?.serving_lte, '4G');
+                applyRfMedian(representative.parsed?.serving_nr, '5G');
+                (representative.__mrdcCells || []).forEach(cell => {
+                    // SCell RF values are not in the primary serving tuple;
+                    // never copy PSCell/PCell levels into a secondary carrier.
+                    if (!/^(?:PSCell|SpCell|PCell)$/i.test(String(cell.type || ''))) return;
+                    applyRfMedian(cell, String(cell.technology || '').toUpperCase() === 'NR' ? '5G' : '4G');
+                });
+                const primaryPrefix = String(representative.parsed?.serving?.rat || '').toUpperCase() === 'NR' ? '5G' : '4G';
+                applyRfMedian(representative.parsed?.serving, primaryPrefix);
+                const primaryRsrp = representative['Serving RSRP'];
+                const primaryRsrq = representative['Serving RSRQ'];
+                const primarySinr = representative['Serving SINR'];
+                if (Number.isFinite(primaryRsrp)) representative.rsrp = representative.level = primaryRsrp;
+                if (Number.isFinite(primaryRsrq)) representative.rsrq = representative.ecno = primaryRsrq;
+                if (Number.isFinite(primarySinr)) representative.sinr = primarySinr;
+                representative.__mergedSamples = group.length;
+                representative.properties['Merged DT snapshots'] = group.length;
+                representative.properties['Snapshot time range'] =
+                    `${group[0].time} → ${representative.time}`;
+            }
+            merged.push(representative);
+            group = [];
+            groupStartMs = NaN;
+        };
+        points.forEach(point => {
+            const pointMs = toTimestamp(point.time);
+            const previous = group[group.length - 1];
+            const canMerge = previous && Number.isFinite(pointMs) && Number.isFinite(groupStartMs) &&
+                pointMs >= groupStartMs && pointMs - groupStartMs <= 1000 &&
+                distanceMeters(point, previous) <= 0.5 && sameServing(point, previous) &&
+                !point.__benchmarkPrimarySelection && !previous.__benchmarkPrimarySelection &&
+                (!state.neighborLayout || sameNeighborSet(point, previous));
+            if (!canMerge) {
+                flushGroup();
+                groupStartMs = pointMs;
+            }
+            group.push(point);
+        });
+        flushGroup();
+        points = merged.map((point, index) => ({ ...point, id: index }));
+
+        // Benchmark/Nemo exports do not always contain decoded RRC handover
+        // messages.  We can nevertheless expose a *measured* NR PSCell
+        // change when two complete NR primary snapshots, close in time and
+        // space, identify different NR cells.  This intentionally remains an
+        // inferred event (not a claimed RRC HO): partial configuration rows,
+        // LTE-only intervals and rows without a radio measurement cannot
+        // create one.
+        const finiteNumber = value => Number.isFinite(Number(value));
+        const validNrPrimarySnapshot = point => {
+            if (point?.__benchmarkPrimarySelection?.NR) return null;
+            const nr = point?.parsed?.serving_nr;
+            const pci = Number(nr?.pci ?? nr?.sc);
+            const arfcn = Number(nr?.nrarfcn ?? nr?.freq);
+            const hasRadioMeasurement = [nr?.rsrp, nr?.rsrq, nr?.sinr]
+                .some(finiteNumber);
+            if (!nr || !finiteNumber(point?.lat) || !finiteNumber(point?.lng) ||
+                !Number.isFinite(pci) || !Number.isFinite(arfcn) || !hasRadioMeasurement) {
+                return null;
+            }
+            return { point, pci: Math.round(pci), arfcn: Math.round(arfcn) };
+        };
+        const isMeasuredLteOnlySnapshot = point => {
+            const lte = point?.parsed?.serving_lte;
+            return !!lte && !point?.parsed?.serving_nr &&
+                [lte.rsrp, lte.rsrq, lte.sinr].some(finiteNumber);
+        };
+        const nrPscellChangeEvents = [];
+        let priorNrPrimary = null;
+        let nrWasExplicitlyReleased = false;
+        points.forEach((point, index) => {
+            if (isMeasuredLteOnlySnapshot(point)) nrWasExplicitlyReleased = true;
+            const current = validNrPrimarySnapshot(point);
+            if (!current) return;
+
+            if (priorNrPrimary) {
+                const elapsedMs = toTimestamp(current.point.time) - toTimestamp(priorNrPrimary.point.time);
+                const movementM = distanceMeters(priorNrPrimary.point, current.point);
+                const cellChanged = priorNrPrimary.pci !== current.pci ||
+                    priorNrPrimary.arfcn !== current.arfcn;
+                if (!nrWasExplicitlyReleased && cellChanged &&
+                    Number.isFinite(elapsedMs) && elapsedMs > 0 && elapsedMs <= 5000 &&
+                    Number.isFinite(movementM) && movementM <= 100) {
+                    const source = priorNrPrimary;
+                    nrPscellChangeEvents.push({
+                        id: `nr_pscell_change_${source.point.id}_${current.point.id}`,
+                        event: 'NR PSCell Change',
+                        eventKind: 'nr_pscell_change',
+                        inferred: true,
+                        time: current.point.time,
+                        lat: current.point.lat,
+                        lng: current.point.lng,
+                        linkedPointIndex: index,
+                        sourcePointIndex: source.point.id,
+                        sourcePci: source.pci,
+                        sourceNrarfcn: source.arfcn,
+                        targetPci: current.pci,
+                        targetNrarfcn: current.arfcn,
+                        elapsedMs,
+                        distanceM: movementM,
+                        message: `Inferred NR PSCell change: PCI ${source.pci} / NR-ARFCN ${source.arfcn} → PCI ${current.pci} / NR-ARFCN ${current.arfcn}`,
+                        properties: {
+                            Event: 'NR PSCell Change',
+                            Evidence: 'Inferred from consecutive NR measurement snapshots; no decoded RRC handover message is available.',
+                            'Source NR PCI': source.pci,
+                            'Source NR-ARFCN': source.arfcn,
+                            'Target NR PCI': current.pci,
+                            'Target NR-ARFCN': current.arfcn,
+                            'Elapsed time (ms)': Math.round(elapsedMs),
+                            'Movement (m)': Math.round(movementM * 10) / 10
+                        }
+                    });
+                }
+            }
+            priorNrPrimary = current;
+            nrWasExplicitlyReleased = false;
+        });
+        const hasMetric = name => points.some(point => {
+            const value = point && point[name];
+            return Number.isFinite(value) || (
+                typeof value === 'string' &&
+                value.trim() !== '' &&
+                value.trim().toUpperCase() !== 'N/A'
+            );
+        });
+        const metrics = Array.from(state.metricNames).filter(hasMetric);
+        const result = {
+            points,
+            tech: '4G/5G Benchmark TXT',
+            customMetrics: metrics,
+            signaling: [],
+            events: nrPscellChangeEvents,
+            callSessions: [],
+            debugInfo: {
+                schema: state.neighborLayout?.schema || 'nemo-benchmark-tab-v1',
+                sourceRows: Math.max(0, state.lineCount - 1),
+                ambiguousPrimaryTimestamps: state.ambiguousPrimaryTimestamps || 0,
+                resolvedPrimaryTimestamps: state.resolvedPrimaryTimestamps || 0,
+                resolvedPrimaryByRsrp: state.resolvedPrimaryByRsrp || 0,
+                unresolvedPrimaryTimestamps: state.unresolvedPrimaryTimestamps || 0,
+                gpsRows: state.gpsRows,
+                validGpsRows: state.validGpsRows,
+                nrPscellChangeEvents: nrPscellChangeEvents.length,
+                reason: points.length ? null : 'No valid GPS coordinates (Lat./Lon.) were found in this Benchmark TXT export.'
+            }
+        };
+        if (!points.length && state.validGpsRows === 0) {
+            throw new Error('Benchmark TXT imported, but no valid GPS coordinates were found. This export has empty or sentinel Lat./Lon. values, so no DT map can be drawn. Re-export it from Nemo/Benchmark with GPS coordinates enabled.');
+        }
+        return result;
+    }
+};
+
+const NMFParser = {
+    _toByteArray(input) {
+        if (!input) throw new Error('NMFS parser: empty input.');
+        if (input instanceof Uint8Array) return input;
+        if (input instanceof ArrayBuffer) return new Uint8Array(input);
+        if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        if (typeof Buffer !== 'undefined' && Buffer.isBuffer && Buffer.isBuffer(input)) {
+            return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        }
+        throw new Error('NMFS parser: unsupported binary input type.');
+    },
+    _decodeLatin1(bytes) {
+        const arr = this._toByteArray(bytes);
+        let out = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < arr.length; i += chunkSize) {
+            const chunk = arr.subarray(i, i + chunkSize);
+            out += String.fromCharCode.apply(null, chunk);
+        }
+        return out;
+    },
+    _normalizeNmfsLine(raw) {
+        return String(raw || '')
+            .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+            .trim();
+    },
+    _parseNmfsMetaLine(line) {
+        const clean = this._normalizeNmfsLine(line);
+        if (!clean.startsWith('#')) return null;
+        const body = clean.slice(1);
+        const parts = body.split(',');
+        const tag = String(parts[0] || '').trim();
+        if (!/^[A-Z][A-Z0-9_]{1,24}$/.test(tag)) return null;
+        const values = parts
+            .slice(1)
+            .map(v => String(v || '').trim().replace(/^"(.*)"$/, '$1'))
+            .filter(v => v !== '');
+        return {
+            tag,
+            values,
+            raw: clean
+        };
+    },
+    _isLikelyNmfRecordLine(line) {
+        const clean = this._normalizeNmfsLine(line);
+        if (!clean || clean.startsWith('#')) return false;
+        if (!clean.includes(',')) return false;
+        const first = String(clean.split(',', 1)[0] || '').trim();
+        if (!/^[A-Z][A-Z0-9@]{1,15}$/.test(first)) return false;
+        const commaCount = (clean.match(/,/g) || []).length;
+        if (commaCount < 2) return false;
+        return true;
+    },
+    _extractNmfsDateTime(meta) {
+        if (!meta) return null;
+        const vals = Array.isArray(meta.values) ? meta.values : [];
+        const time = vals.find(v => /^\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?$/.test(String(v)));
+        const date = vals.find(v => /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(String(v)));
+        if (date && time) return `${date} ${time}`;
+        return time || date || null;
+    },
+    parseNmfs(input) {
+        const bytes = this._toByteArray(input);
+        const signature = bytes.length >= 4
+            ? String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3])
+            : '';
+        const rawText = this._decodeLatin1(bytes);
+        const lines = rawText.split(/\r?\n/);
+
+        // Fallback for non-secure / mislabeled files: treat as text NMF.
+        if (signature !== 'NMFS') {
+            const parsedText = this.parse(rawText);
+            return {
+                ...parsedText,
+                nmfs: {
+                    signature,
+                    decodeMode: 'text_fallback',
+                    metadataCount: 0,
+                    recordLineCount: 0,
+                    hasStartTag: false,
+                    hasStopTag: false
+                }
+            };
+        }
+
+        const metaEntries = [];
+        const recordLines = [];
+        let hasStartTag = false;
+        let hasStopTag = false;
+        let inPayload = false;
+
+        for (const raw of lines) {
+            const line = this._normalizeNmfsLine(raw);
+            if (!line) continue;
+            const markerIdx = line.indexOf('#');
+            const markerLine = markerIdx >= 0 ? line.slice(markerIdx) : '';
+            if (markerLine) {
+                const markerUpper = markerLine.toUpperCase();
+                if (markerUpper.startsWith('#START')) {
+                    hasStartTag = true;
+                    inPayload = true;
+                }
+                if (markerUpper.startsWith('#STOP')) {
+                    hasStopTag = true;
+                    inPayload = false;
+                }
+                const meta = this._parseNmfsMetaLine(markerLine);
+                if (meta) metaEntries.push(meta);
+            }
+            if (inPayload && this._isLikelyNmfRecordLine(line)) {
+                recordLines.push(line);
+            }
+        }
+
+        const decodeMode = recordLines.length > 0
+            ? 'metadata_plus_plaintext'
+            : 'metadata_only_secure_payload';
+        const nmfsSummary = {
+            signature,
+            decodeMode,
+            metadataCount: metaEntries.length,
+            recordLineCount: recordLines.length,
+            hasStartTag,
+            hasStopTag,
+            metadata: metaEntries.slice(0, 200)
+        };
+
+        const parsedBase = recordLines.length > 0
+            ? this.parse(recordLines.join('\n'))
+            : {
+                points: [],
+                signaling: [],
+                events: [],
+                callSessions: [],
+                umtsCallAnalysis: null,
+                tech: 'Nemo NMFS',
+                config: null,
+                configHistory: [],
+                customMetrics: []
+            };
+
+        const metaByTag = new Map();
+        for (const meta of metaEntries) {
+            if (!meta || !meta.tag) continue;
+            if (!metaByTag.has(meta.tag)) metaByTag.set(meta.tag, []);
+            metaByTag.get(meta.tag).push(meta);
+        }
+        const startMeta = (metaByTag.get('START') || [])[0] || null;
+        const stopMeta = (metaByTag.get('STOP') || [])[0] || null;
+        const summaryTime = this._extractNmfsDateTime(startMeta) || this._extractNmfsDateTime(stopMeta) || 'N/A';
+        const summarySignal = {
+            time: summaryTime,
+            type: 'SIGNALING',
+            event: 'NMFS Secure Container',
+            message: `NMFS decoded as ${decodeMode}: ${recordLines.length} plaintext record lines recovered, ${metaEntries.length} metadata lines.`,
+            properties: {
+                Time: summaryTime,
+                Type: 'SIGNALING',
+                Event: 'NMFS Secure Container',
+                'NMFS Decode Mode': decodeMode,
+                'NMFS Metadata Lines': metaEntries.length,
+                'NMFS Plaintext Record Lines': recordLines.length,
+                'NMFS Start Tag': hasStartTag ? 'Yes' : 'No',
+                'NMFS Stop Tag': hasStopTag ? 'Yes' : 'No'
+            }
+        };
+
+        return {
+            ...parsedBase,
+            tech: parsedBase.tech || 'Nemo NMFS',
+            signaling: (parsedBase.signaling || []).concat([summarySignal]),
+            customMetrics: Array.from(new Set([...(parsedBase.customMetrics || []), 'NMFS Decode Mode', 'NMFS Metadata Lines', 'NMFS Plaintext Record Lines'])),
+            nmfs: nmfsSummary
+        };
+    },
+    parse(content) {
+        const lines = content.split(/\r?\n/);
+        const uniqueHeaders = new Set();
+
+        // Fast optimized timestamp parser as recommended 
+        const parseTodMs = (t) => {
+            if (!t) return NaN;
+            const parts = t.split(/[:.]/);
+            if (parts.length < 3) return NaN;
+            const h = parseInt(parts[0], 10);
+            const m = parseInt(parts[1], 10);
+            const s = parseInt(parts[2], 10);
+            const ms = parts.length > 3 ? parseInt(parts[3], 10) : 0;
+            return ((h * 60 + m) * 60 + s) * 1000 + ms;
+        };
+
+        const tsState = { baseUtcMs: null, prevTodMs: null, dayOffset: 0 };
+        const resetAbsMs = () => { tsState.prevTodMs = null; tsState.dayOffset = 0; };
+
+        const parseStartDate = (parts) => {
+            for (const raw of parts) {
+                const txt = String(raw || '').trim().replace(/^"|"$/g, '');
+                const m = txt.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+                if (!m) continue;
+                return {
+                    day: parseInt(m[1], 10),
+                    month: parseInt(m[2], 10),
+                    year: parseInt(m[3], 10)
+                };
+            }
+            return null;
+        };
+
+        const setBaseDate = (dmy) => {
+            if (!dmy) return;
+            if (dmy.month < 1 || dmy.month > 12) return;
+            if (dmy.day < 1 || dmy.day > 31) return;
+            const newBase = Date.UTC(dmy.year, dmy.month - 1, dmy.day, 0, 0, 0, 0);
+            if (tsState.baseUtcMs && newBase <= tsState.baseUtcMs) return;
+            tsState.baseUtcMs = newBase;
+            tsState.prevTodMs = null;
+            tsState.dayOffset = 0;
+        };
+        const buildAbsMs = (timeText) => {
+            const todMs = parseTodMs(timeText);
+            if (!Number.isFinite(todMs)) return NaN;
+
+            const nearEnd = tsState.prevTodMs > 18 * 3600 * 1000;
+            const nearStart = todMs < 6 * 3600 * 1000;
+            if (Number.isFinite(tsState.prevTodMs) && nearEnd && nearStart && todMs < tsState.prevTodMs) {
+                tsState.dayOffset += 1;
+            }
+            tsState.prevTodMs = todMs;
+            const base = tsState.baseUtcMs || 0;
+            return base + tsState.dayOffset * 24 * 3600 * 1000 + todMs;
+        };
+
+        // Pass 1: State Tracking Structures
+        const identityTrack = []; // [{time, cid, rnc, lac, psc}]
+        const gpsTrack = [];      // [{time, lat, lng, alt, speed}]
+
+        // --- PASS 1: Collection ---
+        resetAbsMs();
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line || line.startsWith('#')) continue;
+            const parts = line.split(',');
+            const header = parts[0];
+            const time = parts[1];
+            if (!time) continue;
+
+            if (header === '#START') {
+                setBaseDate(parseStartDate(parts));
+                continue;
+            }
+
+            if (header === 'CHI') {
+                const tech = parseInt(parts[3]);
+                let statRat = 'UNKNOWN';
+                if (tech === 5) statRat = 'UMTS';
+                if (tech === 7) statRat = 'LTE';
+                let state = { time, cid: null, rnc: null, lac: null, psc: null, rat: statRat };
+
+                if (tech === 5) {
+                    // Refined 3G Search
+                    let foundBigId = false;
+                    for (let k = 6; k < parts.length; k++) {
+                        const val = parseInt(parts[k]);
+                        if (!isNaN(val) && val > 20000) {
+                            state.cid = val;
+                            state.rnc = val >> 16;
+                            foundBigId = true;
+                            // Search for LAC and PSC nearby
+                            for (let j = 1; j <= 4; j++) {
+                                if (k + j >= parts.length) break;
+                                const cand = parts[k + j];
+                                if (cand.includes('.') || cand === '') continue;
+                                const cVal = parseInt(cand);
+                                if (!isNaN(cVal) && cVal > 0 && cVal < 65535) {
+                                    if (!state.lac || state.lac === 0) state.lac = cVal;
+                                    else if (state.psc === null && cVal <= 511) state.psc = cVal;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    if (!foundBigId) {
+                        // Strict fallback check for specific columns (Standard NMF: 9=RNC, 12=CID or vice versa)
+                        // If we didn't find a Big ID, we look for two valid integers
+                        let candidates = [];
+                        for (let k = 6; k < parts.length; k++) {
+                            const cVal = parseInt(parts[k]);
+                            if (!isNaN(cVal) && !parts[k].includes('.') && cVal > 0) candidates.push({ idx: k, val: cVal });
+                        }
+                        // Priority: If we have an obvious RNC/CID pair (e.g. 445 and 58134)
+                        let rnc = candidates.find(c => c.val > 10 && c.val < 4096);
+                        let cid = candidates.find(c => c.val > 4096 && c.val < 65535 && (!rnc || c.idx !== rnc.idx));
+                        if (rnc && cid) {
+                            state.rnc = rnc.val;
+                            state.cid = (rnc.val << 16) + cid.val;
+                        }
+                    }
+
+                    // --- NEW: Event 1A Config Extraction (Heuristic) ---
+                    // Pattern in user log: ... 3.0,100,5.0,1280,0.5,100 ...
+                    // Mapping Hypothesis: Hysteresis, RSCP_Thresh, Range, TTT, ?, ?
+                    // We look for the sequence of float, int/float, float, 1280/640/320 
+                    for (let x = 10; x < parts.length - 5; x++) {
+                        const v1 = parseFloat(parts[x]);
+                        const v2 = parseFloat(parts[x + 1]);
+                        const v3 = parseFloat(parts[x + 2]);
+                        const v4 = parseInt(parts[x + 3]);
+                        const v5 = parseFloat(parts[x + 4]);
+                        const v6 = parseFloat(parts[x + 5]);
+
+                        // Check for TTT characteristic values (1280, 640, 320, 160)
+                        if (!isNaN(v1) && !isNaN(v3) && [1280, 640, 320, 160, 100, 200].includes(v4)) {
+                            // Valid candidate sequence
+                            if (v1 >= 0 && v1 <= 10 && v3 >= 0 && v3 <= 10) {
+                                // Initialize history if needed
+                                if (!this.event1AHistory) this.event1AHistory = [];
+
+                                // Capture entry
+                                this.event1AHistory.push({
+                                    time: time,
+                                    hysteresis: v1,
+                                    thresholdRSCP: v2,
+                                    range: v3,
+                                    timeToTrigger: v4,
+                                    filterCoef: v5,
+                                    thresholdEcNo: v6,
+                                    rawValues: [v1, v2, v3, v4, v5, v6, parseFloat(parts[x + 6]), parseFloat(parts[x + 7])],
+                                    maxActiveSet: 3 // Default
+                                });
+
+                                // Keep legacy single config for backward compatibility/summary
+                                if (!this.detected1AConfig) {
+                                    this.detected1AConfig = this.event1AHistory[0];
+                                }
+                            }
+                        }
+                    }
+                } else if (tech === 7) {
+                    // LTE
+                    if (parts.length > 10) {
+                        state.cid = parseInt(parts[9]);
+                        state.lac = parseInt(parts[10]);
+                    }
+                }
+                if (state.cid || statRat !== 'UNKNOWN') identityTrack.push({ ...state, tMs: buildAbsMs(state.time) });
+
+            } else if (header === 'GPS') {
+                if (parts.length > 4) {
+                    const lat = parseFloat(parts[4]);
+                    const lng = parseFloat(parts[3]);
+                    if (!isNaN(lat) && !isNaN(lng)) {
+                        gpsTrack.push({
+                            time,
+                            tMs: buildAbsMs(time),
+                            lat, lng,
+                            alt: parseFloat(parts[5]),
+                            speed: parseFloat(parts[8])
+                        });
+                    }
+                }
+            } else if (header === 'EDCHI' || header === 'CHI' || header === 'PCHI') {
+                const tech = parseInt(parts[3]);
+                if (tech === 5) {
+                    // Extract PSC and Freq from Event Identity records
+                    const freq = parseFloat(parts[10]);
+                    const psc = parseInt(parts[11]);
+                    if (!isNaN(freq) && freq > 0) {
+                        // Create a partial identity state if we don't have a full UCID yet
+                        identityTrack.push({
+                            time,
+                            tMs: buildAbsMs(time),
+                            freq: freq,
+                            psc: psc,
+                            source: header
+                        });
+                    }
+                }
+            } else if (header === 'RRCSM') {
+                // PASS 1 SIGNALING HEURISTIC: Extract authoritative UCID from hex payloads
+                const tech = parseInt(parts[3]);
+                const hex = parts[parts.length - 1];
+                if (tech === 5 && hex && hex.length > 30) {
+                    const msgType = parts[5];
+                    const isRelevantMsg = msgType && (
+                        msgType.includes('RECONFIGURATION') ||
+                        msgType.includes('ACTIVE_SET_UPDATE') ||
+                        msgType.includes('MEASUREMENT_CONTROL') ||
+                        msgType.includes('CELL_UPDATE') ||
+                        msgType.includes('TRANSPORT_CHANNEL') ||
+                        msgType.includes('HANDOVER_FROM_UTRAN') ||
+                        msgType.includes('SYSTEM_INFORMATION')
+                    );
+
+                    if (isRelevantMsg) {
+                        // HEURISTIC: Skip headers
+                        const payload = hex.substring(8);
+
+                        // Search for known RNC hex patterns: 442-446 (0x1BA-0x1BE)
+                        let foundIdx = -1;
+                        let matchedRnc = null;
+
+                        const patterns = { "1BA": 442, "1BB": 443, "1BC": 444, "1BD": 445, "1BE": 446 };
+                        for (const [prefix, rncVal] of Object.entries(patterns)) {
+                            const idx = payload.indexOf(prefix);
+                            if (idx !== -1) {
+                                foundIdx = idx;
+                                matchedRnc = rncVal;
+                                break;
+                            }
+                        }
+
+                        if (foundIdx !== -1 && foundIdx + 6 <= payload.length) {
+                            const ucidShortHex = payload.substring(foundIdx, foundIdx + 6);
+                            const ucidShortVal = parseInt(ucidShortHex, 16);
+                            if (!isNaN(ucidShortVal)) {
+                                const rnc = ucidShortVal >> 12;
+                                const cidShort = (ucidShortVal & 0xFFF);
+
+                                // Synthesize a 28nd bit compatible ID (RNC << 16 + ShortCID << 4)
+                                const synthesizedCid = (rnc << 16) + (cidShort << 4);
+
+                                identityTrack.push({
+                                    time,
+                                    tMs: buildAbsMs(time),
+                                    cid: synthesizedCid,
+                                    rnc: matchedRnc,
+                                    psc: parseInt(parts[8]),
+                                    rat: 'UMTS',
+                                    source: 'signaling_rrc',
+                                    isSignaling: true
+                                });
+                            }
+                        }
+                    }
+                }
+            } else if (header === 'CHI') {
+                const tech = parseInt(parts[3]);
+                const statRat = tech === 5 ? 'UMTS' : (tech === 7 ? 'LTE' : 'UNKNOWN');
+                if (tech === 5) {
+                    const ucid = parseInt(parts[7]);
+                    const rnc = parseInt(parts[8]);
+                    const lac = parseInt(parts[9]);
+                    if (!isNaN(rnc) && !isNaN(ucid)) {
+                        identityTrack.push({ time, tMs: buildAbsMs(time), cid: ucid, rnc: rnc, lac: lac, rat: statRat, source: 'CHI', isSignaling: true });
+                    } else {
+                        identityTrack.push({ time, tMs: buildAbsMs(time), cid: null, rnc: null, lac: null, rat: statRat, source: 'CHI' });
+                    }
+                } else if (tech === 7) {
+                    const eci = parseInt(parts[9]);
+                    const tac = parseInt(parts[10]);
+                    if (!isNaN(eci)) {
+                        identityTrack.push({ time, tMs: buildAbsMs(time), cid: eci, lac: tac, rat: statRat, source: 'CHI', isSignaling: true });
+                    } else {
+                        identityTrack.push({ time, tMs: buildAbsMs(time), cid: null, lac: null, rat: statRat, source: 'CHI' });
+                    }
+                }
+            } else if (header === 'CREL') {
+                const tech = parseInt(parts[10]);
+                const rnc = parseInt(parts[12]);
+                const ucid = parseInt(parts[13]);
+                if (tech === 5 && !isNaN(rnc) && !isNaN(ucid)) {
+                    identityTrack.push({ time, tMs: buildAbsMs(time), cid: ucid, rnc: rnc, rat: 'UMTS', source: 'CREL', isSignaling: true });
+                }
+            } else if (header === 'RRD') {
+                const cause = parts[6];
+                if (cause === '1' || cause === '5') {
+                    identityTrack.push({
+                        time,
+                        tMs: buildAbsMs(time),
+                        source: 'RRD_EVENT',
+                        isEvent: true,
+                        eventType: cause === '1' ? 'Call Drop' : 'Call Fail',
+                        eventCause: cause
+                    });
+                }
+            }
+        }
+
+        // Sort tracks to ensure lookup works
+        const timeMsSort = (a, b) => {
+            if (Number.isNaN(a.tMs) && Number.isNaN(b.tMs)) return a.time.localeCompare(b.time);
+            if (Number.isNaN(a.tMs)) return 1;
+            if (Number.isNaN(b.tMs)) return -1;
+            return a.tMs - b.tMs;
+        };
+        identityTrack.sort(timeMsSort);
+
+        // --- PASS 2: Processing ---
+        resetAbsMs();
+        // Reset state from Pass 1 to prevent carry-over if concatenated
+        let allPoints = [];
+        let currentNeighbors = [];
+        let currentRrcState = 'IDLE';
+        let latestUeTxPower = null;
+        let latestNodeBTxPower = null;
+        let latestTpc = null;
+        let latestLteSinr = null;
+        let latestTimingAdvance = null;
+        let latestCqiDl = null;
+        let latestBlerDl = null;
+        let latestBlerUl = null;
+        let lastAsSize = null;
+        // Re-init RAT/serving state
+        let state = { imsi: null, cid: null, rat: 'UNKNOWN' };
+
+        let idIdx = 0;
+        let lastIdState = null;
+
+        let gpsIdx = 0;
+        let lastGpsState = null;
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line || line.startsWith('#')) continue;
+            const parts = line.split(',');
+            const header = parts[0];
+            const time = parts[1];
+            if (!time) continue;
+
+            if (header === '#START') {
+                setBaseDate(parseStartDate(parts));
+                // Clear active transient status on log segment boundary
+                currentNeighbors = [];
+                currentRrcState = 'IDLE';
+                state.cid = null;
+                state.rat = 'UNKNOWN';
+                continue;
+            }
+
+            const currentMs = buildAbsMs(time);
+
+            // Forward-only O(1) state resolution tracker for linear O(N) scaling
+            if (!Number.isNaN(currentMs)) {
+                while (idIdx < identityTrack.length && identityTrack[idIdx].tMs <= currentMs) {
+                    lastIdState = identityTrack[idIdx];
+                    idIdx++;
+                }
+                while (gpsIdx < gpsTrack.length && gpsTrack[gpsIdx].tMs <= currentMs) {
+                    lastGpsState = gpsTrack[gpsIdx];
+                    gpsIdx++;
+                }
+            }
+
+            const state = lastIdState || { cid: 'N/A', rnc: null, lac: 'N/A', psc: null, rat: 'UNKNOWN' };
+            const gps = lastGpsState;
+
+            // RRC State State Machine (Simple Heuristic)
+            const upperHeader = header.toUpperCase();
+            if (upperHeader === 'RRCSM') {
+                const partsForMsg = line.toUpperCase(); // check whole line for ease
+                const isDl = parts[4] === '2';
+                const isUl = parts[4] === '1';
+
+                if (partsForMsg.includes('RADIO_BEARER_SETUP') ||
+                    partsForMsg.includes('RADIO_BEARER_RECONFIGURATION') ||
+                    partsForMsg.includes('PHYSICAL_CHANNEL_RECONFIGURATION') ||
+                    partsForMsg.includes('ACTIVE_SET_UPDATE') ||
+                    partsForMsg.includes('MEASUREMENT_CONTROL')) {
+                    currentRrcState = 'CELL_DCH';
+
+                    if (isDl && !partsForMsg.includes('COMPLETE')) {
+                        // Handover Command
+                        allPoints.push({
+                            lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                            type: 'EVENT', event: 'HO Command', message: parts[5],
+                            properties: {
+                                'Time': time, 'Type': 'EVENT', 'Event': 'HO Command', 'Message': parts[5],
+                                'HO Command': 'HO Command'
+                            }
+                        });
+                    }
+                } else if (partsForMsg.includes('CELL_UPDATE')) {
+                    currentRrcState = 'CELL_FACH';
+                } else if (partsForMsg.includes('PAGING_TYPE')) {
+                    currentRrcState = 'IDLE'; // or PCH
+                } else if (partsForMsg.includes('RRC_CONNECTION_RELEASE')) {
+                    currentRrcState = 'IDLE';
+                    // Added Release Cause Logic
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'RRC Release', message: 'RRC Connection Released',
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'RRC Release',
+                            'RRC Release Cause': 'Normal (Implied)',
+                            'rrc_rel_cause': 'Normal',
+                            'cs_rel_cause': state.cs_cause || 'N/A',
+                            'iucs_status': 'Released'
+                        }
+                    });
+                    if (!state.rrc_cause) state.rrc_cause = 'Normal';
+                    state.iucs_status = 'Released';
+                } else if (partsForMsg.includes('RRC_CONNECTION_REJECT')) {
+                    currentRrcState = 'IDLE';
+                }
+
+                if (isUl && partsForMsg.includes('COMPLETE')) {
+                    // Handover / Message Completion
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'HO Completion', message: parts[5],
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'HO Completion', 'Message': parts[5],
+                            'HO Completion': 'HO Completion'
+                        }
+                    });
+                }
+
+                // --- NEW: Radio Link Failure & Sync Status ---
+                const msgUpper = partsForMsg.replace(/_/g, ' '); // Normalize for loose matching
+                if (msgUpper.includes('OUT') && msgUpper.includes('SYNC')) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'DL sync loss (Interference / coverage)', message: 'Downlink Out of Sync Indication',
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'DL sync loss (Interference / coverage)',
+                            'DL sync loss (Interference / coverage)': 'DL sync loss (Interference / coverage)'
+                        }
+                    });
+                }
+                if (msgUpper.includes('UL') && msgUpper.includes('SYNC') && msgUpper.includes('LOSS')) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'UL sync loss (UE can’t reach NodeB)', message: 'Uplink Synchronization Loss',
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'UL sync loss (UE can’t reach NodeB)',
+                            'UL sync loss (UE can’t reach NodeB)': 'UL sync loss (UE can’t reach NodeB)'
+                        }
+                    });
+                }
+                if (msgUpper.includes('RL FAILURE') || msgUpper.includes('RADIO LINK FAILURE') || msgUpper.includes('RLF') || msgUpper.includes('REESTABLISHMENT')) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'RLF indication', message: parts[5] || 'Radio Link Failure Indication',
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'RLF indication',
+                            'RLF indication': 'RLF indication'
+                        }
+                    });
+                }
+
+                // --- NEW: Timers (T310, T312) ---
+                if (partsForMsg.includes('T310_EXPIRY') || partsForMsg.includes('T310 EXPIRED')) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'T310', message: 'Timer T310 Expired',
+                        properties: { 'Time': time, 'Type': 'EVENT', 'Event': 'T310', 'T310': 'Expired' }
+                    });
+                }
+                if (partsForMsg.includes('T312_EXPIRY') || partsForMsg.includes('T312 EXPIRED')) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'T312', message: 'Timer T312 Expired',
+                        properties: { 'Time': time, 'Type': 'EVENT', 'Event': 'T312', 'T312': 'Expired' }
+                    });
+                }
+                if (line.includes('"SystemInformation - SIB2,SIB3"') || line.includes('"SystemInformation - SIB3"') || line.includes('"SystemInformation - SIB5"')) {
+                    const quoted = [...line.matchAll(/"([^"]*)"/g)].map((m) => String(m[1] || ''));
+                    const sibEventName = quoted.find((txt) => /^SystemInformation - SIB(?:2,SIB3|3|5)$/i.test(String(txt || ''))) || null;
+                    const payloadHex = quoted.length ? String(quoted[quoted.length - 1] || '').trim() : '';
+                    const earfcnIdx = sibEventName && /SIB2,SIB3|SIB3/i.test(sibEventName) ? 8 : 7;
+                    const pciIdx = sibEventName && /SIB2,SIB3|SIB3/i.test(sibEventName) ? 9 : 8;
+                    const servingEarfcn = Number(parts[earfcnIdx]);
+                    const servingPci = Number(parts[pciIdx]);
+                    if (sibEventName && /^[0-9A-F]+$/i.test(payloadHex)) {
+                        allPoints.push({
+                            lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                            type: 'EVENT', event: sibEventName, message: sibEventName,
+                            properties: {
+                                'Time': time,
+                                'Type': 'EVENT',
+                                'Event': sibEventName,
+                                'RRC raw payload hex': payloadHex,
+                                'Serving EARFCN': Number.isFinite(servingEarfcn) ? servingEarfcn : 'N/A',
+                                'Serving PCI': Number.isFinite(servingPci) ? servingPci : 'N/A'
+                            }
+                        });
+                    }
+                }
+            } else if (upperHeader === 'HOA') {
+                const srcEarfcn = Number(parts[8]);
+                const srcPci = Number(parts[9]);
+                const tgtEarfcn = Number(parts[13]);
+                const tgtPci = Number(parts[14]);
+                const hasSrc = Number.isFinite(srcPci) || Number.isFinite(srcEarfcn);
+                const hasTgt = Number.isFinite(tgtPci) || Number.isFinite(tgtEarfcn);
+                if (hasSrc || hasTgt) {
+                    const isInterFreq = Number.isFinite(srcEarfcn) && Number.isFinite(tgtEarfcn) && srcEarfcn !== tgtEarfcn;
+                    const hoType = isInterFreq ? 'InterFreq' : 'IntraFreq';
+                    const triggerFamily = isInterFreq ? 'A5' : 'A3';
+                    const srcLabel = `${Number.isFinite(srcPci) ? srcPci : '?'}${Number.isFinite(srcEarfcn) ? `/${srcEarfcn}` : ''}`;
+                    const tgtLabel = `${Number.isFinite(tgtPci) ? tgtPci : '?'}${Number.isFinite(tgtEarfcn) ? `/${tgtEarfcn}` : ''}`;
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'A3/A5 Event', message: `${triggerFamily} ${hoType} HOA ${srcLabel} -> ${tgtLabel}`,
+                        properties: {
+                            'Time': time,
+                            'Type': 'EVENT',
+                            'Event': 'A3/A5 Event',
+                            'A3/A5 Event': `${triggerFamily} ${hoType}`,
+                            'A5 event': isInterFreq ? 'Yes' : 'No',
+                            'A3/A5 triggers': `${triggerFamily} (executed HOA)`,
+                            'HO type': hoType,
+                            'HO source PCI': Number.isFinite(srcPci) ? srcPci : 'N/A',
+                            'HO source EARFCN': Number.isFinite(srcEarfcn) ? srcEarfcn : 'N/A',
+                            'HO target PCI': Number.isFinite(tgtPci) ? tgtPci : 'N/A',
+                            'HO target EARFCN': Number.isFinite(tgtEarfcn) ? tgtEarfcn : 'N/A',
+                            'rrc_recfg_src_pci': Number.isFinite(srcPci) ? srcPci : 'N/A',
+                            'rrc_recfg_src_earfcn': Number.isFinite(srcEarfcn) ? srcEarfcn : 'N/A',
+                            'rrc_recfg_tgt_pci': Number.isFinite(tgtPci) ? tgtPci : 'N/A',
+                            'rrc_recfg_tgt_earfcn': Number.isFinite(tgtEarfcn) ? tgtEarfcn : 'N/A'
+                        }
+                    });
+                }
+            } else if (upperHeader === 'L3SM') {
+                const messageName = parts[5].replace(/^"|"$/g, '');
+                if (messageName === 'RELEASE' || messageName === 'DISCONNECT') {
+                    // CS Release
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'CS Release', message: 'CS Call Released',
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'CS Release',
+                            'CS Release Cause': 'Normal Clearing',
+                            'rrc_rel_cause': state.rrc_cause || 'N/A',
+                            'cs_rel_cause': 'Normal Clearing',
+                            'iucs_status': 'Released'
+                        }
+                    });
+                    state.cs_cause = 'Normal Clearing';
+                    state.iucs_status = 'Released';
+                } else if (messageName === 'CONNECT' || messageName === 'SETUP') {
+                    state.iucs_status = 'Connected';
+                    state.cs_cause = '-';
+                }
+            } else if (upperHeader === 'RRCSM' || upperHeader === 'L3SM') {
+                const msgUpper = line.toUpperCase().replace(/_/g, ' ');
+                if (msgUpper.includes('T310')) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'T310', message: 'T310 Timer Expired',
+                        properties: { 'Time': time, 'Type': 'EVENT', 'Event': 'T310', 'T310': 'Expired' }
+                    });
+                }
+                if (msgUpper.includes('T312')) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'T312', message: 'T312 Timer Expired',
+                        properties: { 'Time': time, 'Type': 'EVENT', 'Event': 'T312', 'T312': 'Expired' }
+                    });
+                }
+            } else if (upperHeader === 'TXPC') {
+                const val = parseFloat(parts[4]);
+                if (!isNaN(val)) latestUeTxPower = val;
+                const tpc = parseInt(parts[5]);
+                if (!isNaN(tpc)) latestTpc = tpc;
+            } else if (upperHeader === 'RXPC') {
+                const val = parseFloat(parts[5]);
+                if (!isNaN(val)) latestNodeBTxPower = val;
+            } else if (upperHeader === 'TAD') {
+                const ta = parseFloat(parts[4]);
+                if (!isNaN(ta) && ta >= 0 && ta <= 2000) latestTimingAdvance = ta;
+            } else if (upperHeader === 'CQI') {
+                const tech = parseInt(parts[3], 10);
+                if (tech === 7) {
+                    const cqiA = Number(parts[7]);
+                    const cqiB = Number(parts[8]);
+                    if (Number.isFinite(cqiA) && cqiA >= 1 && cqiA <= 15) latestCqiDl = cqiA;
+                    else if (Number.isFinite(cqiB) && cqiB >= 1 && cqiB <= 15) latestCqiDl = cqiB;
+                }
+            } else if (upperHeader === 'RRD') {
+                const cause = parts[6];
+                if (cause === '1' || cause === '5') {
+                    const eventName = (cause === '1') ? 'Call Drop' : 'RLF indication';
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: eventName, message: `RRD Release Cause ${cause}`,
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': eventName,
+                            [eventName]: eventName
+                        }
+                    });
+                }
+            } else if (upperHeader === 'RRA') {
+                const cause = parts[5]; // RRA code is usually at index 5 or 6 depending on subversion
+                let eventName = null;
+                if (cause === '16' || cause === '2') eventName = 'RLF indication';
+                else if (cause === '12') eventName = 'DL sync loss (Interference / coverage)';
+                else if (cause === '4') eventName = 'UL sync loss (UE can’t reach NodeB)';
+
+                if (eventName) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: eventName, message: `Radio Resource Alarm (RRA Cause ${cause})`,
+                        properties: { 'Time': time, 'Type': 'EVENT', 'Event': eventName, [eventName]: eventName }
+                    });
+                }
+            } else if (upperHeader === 'RRCSM') {
+                // Clean parts (remove quotes)
+                const messageName = parts[5].replace(/^"|"$/g, '');
+                // console.log(`[DEBUG] RRCSM Msg: ${messageName}`);
+                if (messageName.includes('RELEASE')) console.log(`[DEBUG] RRCSM RELEASE: ${messageName}`);
+
+                if (messageName === 'RRC_CONNECTION_RELEASE') {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'RRC Release', message: 'RRC Connection Released',
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'RRC Release',
+                            'RRC Release Cause': 'Normal (Implied)',
+                            'rrc_rel_cause': 'Normal',
+                            'cs_rel_cause': state.cs_cause || 'N/A',
+                            'iucs_status': 'Released'
+                        }
+                    });
+                    // Track last RRC Cause for metric
+                    if (!state.rrc_cause) state.rrc_cause = 'Normal';
+                    state.iucs_status = 'Released';
+                }
+            } else if (upperHeader === 'CAF') {
+                const cause = parts[6];
+                if (cause === '2') {
+                    const messageName = parts[5].replace(/^"|"$/g, '');
+                    // Original RRC Release check removed (wrong place) or kept as fallback? 
+                    // Keeping as fallback if needed, but the main one is RRCSM.
+                    if (messageName === 'RRC_CONNECTION_RELEASE') {
+                        // Fallback logic SAME as above
+                        if (!state.rrc_cause) state.rrc_cause = 'Normal';
+                        state.iucs_status = 'Released';
+                    } else {
+                        // Original RLF indication for CAF cause 2
+                        allPoints.push({
+                            lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                            type: 'EVENT', event: 'RLF indication', message: 'Channel Activation Failure (CAF)',
+                            properties: { 'Time': time, 'Type': 'EVENT', 'Event': 'RLF indication', 'RLF indication': 'RLF indication' }
+                        });
+                    }
+                }
+            } else if (upperHeader === 'L3SM') {
+                // CS Release (CC Release)
+                const messageName = parts[5].replace(/^"|"$/g, '');
+                if (messageName.includes('RELEASE') || messageName.includes('DISCONNECT')) console.log(`[DEBUG] L3SM RELEASE: ${messageName}`);
+                if (messageName === 'RELEASE' || messageName === 'DISCONNECT') {
+                    // CS Release
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'CS Release', message: 'CS Call Released',
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'CS Release',
+                            'CS Release Cause': 'Normal Clearing',
+                            'rrc_rel_cause': state.rrc_cause || 'N/A',
+                            'cs_rel_cause': 'Normal Clearing',
+                            'iucs_status': 'Released'
+                        }
+                    });
+                    state.cs_cause = 'Normal Clearing';
+                    state.iucs_status = 'Released';
+                } else if (messageName === 'CONNECT' || messageName === 'SETUP') {
+                    state.iucs_status = 'Connected';
+                    state.cs_cause = '-'; // Reset cause on new call
+                }
+
+                const msgUpper = line.toUpperCase();
+                if (msgUpper.includes('OUT') && msgUpper.includes('SYNC')) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'DL sync loss (Interference / coverage)', message: 'Downlink Out of Sync Indication (L3)',
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'DL sync loss (Interference / coverage)',
+                            'DL sync loss (Interference / coverage)': 'DL sync loss (Interference / coverage)'
+                        }
+                    });
+                }
+                if (msgUpper.includes('RL FAILURE') || msgUpper.includes('RADIO LINK FAILURE') || msgUpper.includes('RLF') || msgUpper.includes('REESTABLISHMENT')) {
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'RLF indication', message: 'Radio Link Failure Indication (L3)',
+                        properties: {
+                            'Time': time, 'Type': 'EVENT', 'Event': 'RLF indication',
+                            'RLF indication': 'RLF indication'
+                        }
+                    });
+                }
+            }
+
+            if (upperHeader === 'CELLMEAS') {
+                if (!gps) continue;
+                const techId = parseInt(parts[3]);
+
+                let servingFreq = null;
+                let servingLevel = null;
+                let servingSc = null;
+                let servingEcNo = null;
+                let servingBand = 'Unknown';
+                let valRssi = null;
+                let activeSetCount = 1;
+                let monitoredSetCount = 0;
+                let neighbors = [];
+                let umtsCellmeasSubtypeStats = null;
+
+                if (techId === 5) {
+                    // UMTS (Tech 5)
+                    const toNumCell = (v) => {
+                        const x = parseFloat(v);
+                        return Number.isFinite(x) ? x : null;
+                    };
+                    const toIntCell = (v) => {
+                        const x = parseInt(v, 10);
+                        return Number.isFinite(x) ? x : null;
+                    };
+                    const looksLikePlmn = (v) => /^[0-9]{5}$/.test(String(v || '').trim());
+                    const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 1;
+                    const validSc = (v) => Number.isFinite(v) && v >= 0 && v <= 512;
+                    const looksLikeRefPower = (v) => Number.isFinite(v) && v <= -50 && v >= -120;
+                    const looksLikeQuality = (v) => Number.isFinite(v) && v <= 0 && v >= -30;
+                    const looksLikeRssi = (v) => Number.isFinite(v) && v <= -50 && v >= -130;
+                    const parseUmtsNeighborTuple = (arr, k, requirePlmn = true) => {
+                        const setType = toIntCell(arr[k]);
+                        if (setType === null || setType < 0 || setType > 3) return null;
+                        const plmn = String(arr[k + 1] || '').trim();
+                        const uarfcn = toNumCell(arr[k + 2]);
+                        const psc = toIntCell(arr[k + 3]);
+                        const x1 = toNumCell(arr[k + 4]);
+                        const x2 = toNumCell(arr[k + 5]);
+                        const x3 = toNumCell(arr[k + 6]);
+                        if ((requirePlmn && !looksLikePlmn(plmn)) || uarfcn === null || uarfcn <= 2000 || !validSc(psc)) return null;
+
+                        // Subtype A: freq,sc,refPower,widebandPower,quality
+                        if (looksLikeRefPower(x1) && looksLikeQuality(x3)) {
+                            return {
+                                setType,
+                                freq: uarfcn,
+                                sc: psc,
+                                ecno: x3,
+                                rscp: x1,
+                                rssi: looksLikeRssi(x2) ? x2 : null,
+                                subtype: 'A',
+                                _k: k
+                            };
+                        }
+                        // Subtype B: freq,sc,ecno,(blank),rscp,...
+                        if (looksLikeQuality(x1) && looksLikeRefPower(x3)) {
+                            return {
+                                setType,
+                                freq: uarfcn,
+                                sc: psc,
+                                ecno: x1,
+                                rscp: x3,
+                                rssi: looksLikeRssi(x2) ? x2 : null,
+                                subtype: 'B',
+                                _k: k
+                            };
+                        }
+                        return null;
+                    };
+                    const scanUmtsServing = (arr, sfreq) => {
+                        for (let i = 0; i < arr.length - 3; i++) {
+                            if (!looksLikePlmn(arr[i])) continue;
+                            const freq = toNumCell(arr[i + 1]);
+                            const sc = toIntCell(arr[i + 2]);
+                            const ecno = toNumCell(arr[i + 3]);
+                            // Sanity: SC 0..511, ECNO 0..-32
+                            if (!near(freq, sfreq) || !validSc(sc) || ecno === null || ecno < -35) continue;
+                            return { sc, ecno };
+                        }
+                        return null;
+                    };
+                    const scanUmtsCellBlocks = (arr) => {
+                        const blocksMap = new Map();
+                        for (let k = 0; k < arr.length - 6; k++) {
+                            const block = parseUmtsNeighborTuple(arr, k, true);
+                            if (!block) continue;
+                            const key = `${Math.round(block.freq)}:${block.sc}`;
+                            const existing = blocksMap.get(key);
+                            const prio = block.setType <= 1 ? 0 : block.setType;
+                            const existingPrio = existing ? (existing.setType <= 1 ? 0 : existing.setType) : 999;
+                            const blockHasRscp = Number.isFinite(block.rscp);
+                            const existingHasRscp = existing ? Number.isFinite(existing.rscp) : false;
+                            if (!existing || prio < existingPrio || (prio === existingPrio && blockHasRscp && !existingHasRscp)) {
+                                blocksMap.set(key, block);
+                            }
+                        }
+                        return Array.from(blocksMap.values());
+                    };
+                    const scanUmtsCellBlocksFallback = (arr) => {
+                        const blocksMap = new Map();
+                        for (let k = 15; k < arr.length - 6; k += 8) {
+                            const block = parseUmtsNeighborTuple(arr, k, false);
+                            if (!block) continue;
+                            const key = `${Math.round(block.freq)}:${block.sc}`;
+                            const existing = blocksMap.get(key);
+                            const prio = block.setType <= 1 ? 0 : block.setType;
+                            const existingPrio = existing ? (existing.setType <= 1 ? 0 : existing.setType) : 999;
+                            const blockHasRscp = Number.isFinite(block.rscp);
+                            const existingHasRscp = existing ? Number.isFinite(existing.rscp) : false;
+                            if (!existing || prio < existingPrio || (prio === existingPrio && blockHasRscp && !existingHasRscp)) {
+                                blocksMap.set(key, block);
+                            }
+                        }
+                        return Array.from(blocksMap.values());
+                    };
+                    const labelUmtsNeighbors = (inNeighbors, sfreq, actCount, monCount) => {
+                        const cleanNeighbors = (inNeighbors || []).filter(n => !n.isServing);
+                        const rscpDesc = (a, b) => (Number(b?.rscp) || -999) - (Number(a?.rscp) || -999);
+                        const byInputOrder = (a, b) => {
+                            const ka = Number.isFinite(Number(a?._k)) ? Number(a._k) : Number.POSITIVE_INFINITY;
+                            const kb = Number.isFinite(Number(b?._k)) ? Number(b._k) : Number.POSITIVE_INFINITY;
+                            if (ka !== kb) return ka - kb;
+                            return rscpDesc(a, b);
+                        };
+                        const isInterFreq = (n) =>
+                            Number.isFinite(Number(n?.freq)) &&
+                            Number.isFinite(Number(sfreq)) &&
+                            Math.abs(Number(n.freq) - Number(sfreq)) >= 1;
+                        const treatSetType1AsMonitored = Number(actCount || 0) <= 1;
+
+                        const activeCandidatesInferred = (inNeighbors || []).filter((n) => {
+                            if (!n || n.isServing) return false;
+                            const st = Number(n.setType);
+                            if (!Number.isFinite(st)) return false;
+                            if (st === 0) return true;
+                            if (!treatSetType1AsMonitored && st === 1) return true;
+                            return false;
+                        });
+                        const inferredActiveSlots = activeCandidatesInferred.length;
+
+                        // actCount=1 means only serving is in AS, so activeSlots for neighbors = 0
+                        // Fallback: if actCount is missing/ambiguous, rely on setType-derived active candidates.
+                        let activeSlots = Math.max(0, (actCount || 1) - 1);
+                        if (inferredActiveSlots > activeSlots) activeSlots = inferredActiveSlots;
+
+                        const hasMonitoredContext = Math.max(0, monCount || 0) > 0;
+
+                        const activeCandidates = [];
+                        const monitored = [];
+                        const detected = [];
+                        const unknown = [];
+
+                        for (const n of cleanNeighbors) {
+                            const st = Number.isFinite(Number(n?.setType)) ? Number(n.setType) : null;
+                            if (st === 0 || (!treatSetType1AsMonitored && st === 1)) activeCandidates.push(n);
+                            else if (treatSetType1AsMonitored && st === 1) monitored.push(n);
+                            else if (st === 2) detected.push(n);
+                            else if (st !== null && st > 2) detected.push(n);
+                            else unknown.push(n);
+                        }
+
+                        activeCandidates.sort(rscpDesc);
+                        monitored.sort(byInputOrder);
+                        detected.sort(byInputOrder);
+                        unknown.sort(byInputOrder);
+
+                        // Keep only the configured active set size in A*, overflow goes to monitored/detected.
+                        const active = activeCandidates.slice(0, activeSlots);
+                        const overflowActive = activeCandidates.slice(activeSlots);
+                        for (const n of overflowActive) {
+                            if (isInterFreq(n) || hasMonitoredContext) monitored.push(n);
+                            else detected.push(n);
+                        }
+
+                        // Unknown setType inference: inter-frequency + monitored context -> monitored, else detected.
+                        for (const n of unknown) {
+                            if (isInterFreq(n) && hasMonitoredContext) monitored.push(n);
+                            else detected.push(n);
+                        }
+
+                        active.sort(rscpDesc);
+                        monitored.sort(byInputOrder);
+                        detected.sort(byInputOrder);
+
+                        const activeLabeled = active.slice(0, 16);
+                        const monitoredLabeled = monitored.slice(0, 16);
+                        const detectedLabeled = detected.slice(0, 16);
+
+                        activeLabeled.forEach((n, i) => {
+                            n.type = `A${i + 2}`;
+                            n.name = n.type;
+                            n.setLabel = 'Active';
+                        });
+                        monitoredLabeled.forEach((n, i) => {
+                            n.type = `M${i + 1}`;
+                            n.name = n.type;
+                            n.setLabel = 'Monitored';
+                        });
+                        detectedLabeled.forEach((n, i) => {
+                            n.type = `D${i + 1}`;
+                            n.name = n.type;
+                            n.setLabel = 'Detected';
+                        });
+
+                        return { neighbors: [...activeLabeled, ...monitoredLabeled, ...detectedLabeled] };
+                    };
+
+                    servingFreq = toNumCell(parts[7]);
+                    const servingFieldRaw = toNumCell(parts[8]); // may be RSCP or wideband-derived field depending on subtype
+                    servingLevel = servingFieldRaw;
+                    servingSc = null;
+                    servingEcNo = null;
+                    activeSetCount = parseInt(parts[5]) || 1;
+                    monitoredSetCount = parseInt(parts[6]) || 0;
+
+                    if (servingFreq !== null && servingFreq <= 0) servingFreq = null;
+                    if (servingFreq !== null) {
+                        if (servingFreq >= 10562 && servingFreq <= 10838) servingBand = 'B1 (2100)';
+                        else if (servingFreq >= 2937 && servingFreq <= 3088) servingBand = 'B8 (900)';
+                    }
+
+                    const servingMatch = scanUmtsServing(parts, servingFreq);
+                    if (servingMatch) {
+                        servingSc = servingMatch.sc;
+                        servingEcNo = servingMatch.ecno;
+                    }
+
+                    let blocks = scanUmtsCellBlocks(parts);
+                    if (!blocks.length) {
+                        blocks = scanUmtsCellBlocksFallback(parts);
+                    }
+                    const servingBlockByTuple = (() => {
+                        const pool = blocks.filter((b) => Number.isFinite(b && b.rscp));
+                        if (!pool.length) return null;
+                        if (validSc(servingSc)) {
+                            const exactOnFreq = pool.find((b) => near(b.freq, servingFreq) && b.sc === servingSc);
+                            if (exactOnFreq) return exactOnFreq;
+                            const exactAnyFreq = pool.find((b) => b.sc === servingSc);
+                            if (exactAnyFreq) return exactAnyFreq;
+                        }
+                        const onServingFreq = pool.filter((b) => near(b.freq, servingFreq));
+                        const base = onServingFreq.length ? onServingFreq : pool;
+                        return base.reduce((best, b) => (!best || b.rscp > best.rscp) ? b : best, null);
+                    })();
+                    if (servingBlockByTuple) {
+                        if (Number.isFinite(servingBlockByTuple.rscp)) servingLevel = servingBlockByTuple.rscp;
+                        if (servingEcNo === null && Number.isFinite(servingBlockByTuple.ecno)) servingEcNo = servingBlockByTuple.ecno;
+                        if (!validSc(servingSc) && validSc(servingBlockByTuple.sc)) servingSc = servingBlockByTuple.sc;
+                    }
+                    const subtypeAcount = blocks.filter((b) => b.subtype === 'A').length;
+                    const subtypeBcount = blocks.filter((b) => b.subtype === 'B').length;
+                    umtsCellmeasSubtypeStats = {
+                        subtypeAcount,
+                        subtypeBcount,
+                        rscpAvailable: blocks.some((b) => Number.isFinite(b && b.rscp))
+                    };
+
+                    neighbors = blocks.map((b) => {
+                        const isServing = near(b.freq, servingFreq) && validSc(servingSc) && b.sc === servingSc;
+                        return {
+                            freq: b.freq,
+                            sc: b.sc, // unified
+                            psc: b.sc,
+                            ecno: b.ecno,
+                            rscp: b.rscp,
+                            rssi: b.rssi,
+                            cellmeasSubtype: b.subtype,
+                            _k: b._k,
+                            setType: b.setType,
+                            isServing
+                        };
+                    });
+
+                    if (!validSc(servingSc) && neighbors.length) {
+                        const onServingFreq = neighbors.filter((n) => near(n.freq, servingFreq));
+                        const fallbackPool = (onServingFreq.length ? onServingFreq : neighbors).filter((n) => Number.isFinite(n.rscp));
+                        const fallbackServing = fallbackPool
+                            .reduce((best, n) => (!best || n.rscp > best.rscp) ? n : best, null);
+                        if (fallbackServing) {
+                            servingSc = fallbackServing.sc;
+                            if (servingEcNo === null) servingEcNo = fallbackServing.ecno;
+                            if (Number.isFinite(fallbackServing.rscp)) servingLevel = fallbackServing.rscp;
+                            neighbors.forEach((n) => {
+                                n.isServing = near(n.freq, servingFreq) && n.sc === servingSc;
+                            });
+                        }
+                    }
+
+                    const labeled = labelUmtsNeighbors(neighbors, servingFreq, activeSetCount, monitoredSetCount);
+                    neighbors = labeled.neighbors;
+
+                    // RSSI calculation for 3G: prefer raw field when it matches RSCP-EcNo relationship.
+                    if (Number.isFinite(servingFieldRaw) && Number.isFinite(servingLevel) && Number.isFinite(servingEcNo)) {
+                        const derivedWideband = servingLevel - servingEcNo;
+                        if (Math.abs(servingFieldRaw - derivedWideband) <= 4) {
+                            valRssi = servingFieldRaw;
+                        }
+                    }
+                    if (valRssi === null && Number.isFinite(servingLevel) && Number.isFinite(servingEcNo)) {
+                        valRssi = servingLevel - servingEcNo;
+                    }
+                } else if (techId === 7) {
+                    // LTE (Tech 7)
+                    // Nemo LTE CELLMEAS tuples map as:
+                    // [typeCode, bandCode, earfcn, pci, auxPower, rsrp, rsrq, cellId, aux1, aux2, sinr]
+                    const lteBandFromEarfcn = (earfcn) => {
+                        if (!Number.isFinite(earfcn)) return 'Unknown';
+                        if (earfcn >= 0 && earfcn <= 599) return 'B1 (2100)';
+                        if (earfcn >= 600 && earfcn <= 1199) return 'B2 (1900)';
+                        if (earfcn >= 1200 && earfcn <= 1949) return 'B3 (1800)';
+                        if (earfcn >= 2400 && earfcn <= 2649) return 'B5 (850)';
+                        if (earfcn >= 2750 && earfcn <= 3449) return 'B7 (2600)';
+                        if (earfcn >= 3450 && earfcn <= 3799) return 'B8 (900)';
+                        if (earfcn >= 6150 && earfcn <= 6449) return 'B20 (800)';
+                        return 'Unknown';
+                    };
+                    servingFreq = parseFloat(parts[9]);
+                    servingLevel = parseFloat(parts[12]); // RSRP
+                    servingSc = parseInt(parts[10]) || 'N/A'; // PCI
+                    servingEcNo = parseFloat(parts[13]); // RSRQ
+                    valRssi = null; // Raw LTE CELLMEAS field before RSRP is not stable enough to label as RSSI.
+                    if (isNaN(servingFreq) || servingFreq <= 0) servingFreq = null;
+                    servingBand = lteBandFromEarfcn(servingFreq);
+                    activeSetCount = 1;
+                    monitoredSetCount = parseInt(parts[6]) || 0;
+
+                    // Neighbors: scan 11-field LTE CELLMEAS blocks directly.
+                    const lteNeighborsMap = new Map();
+                    const lteBlocks = [];
+                    for (let k = 7; k + 10 < parts.length; k += 11) {
+                        const typeCode = parseInt(parts[k], 10);
+                        const bandCode = parseInt(parts[k + 1], 10);
+                        const freq = parseFloat(parts[k + 2]);
+                        const pci = parseInt(parts[k + 3], 10);
+                        const auxPower = parseFloat(parts[k + 4]);
+                        const rsrp = parseFloat(parts[k + 5]);
+                        const rsrq = parseFloat(parts[k + 6]);
+                        const cellIdentity = parseInt(parts[k + 7], 10);
+                        const auxMetric = parseFloat(parts[k + 8]);
+                        const sinr = parseFloat(parts[k + 10]);
+
+                        const validType = Number.isFinite(typeCode) && typeCode >= 0 && typeCode <= 20;
+                        const validFreq = Number.isFinite(freq) && freq > 0 && freq < 100000 && Math.abs(freq - Math.round(freq)) < 0.01;
+                        const validPci = Number.isFinite(pci) && pci >= 0 && pci <= 503;
+                        const validRsrp = Number.isFinite(rsrp) && rsrp < -20 && rsrp > -140;
+                        const validRsrq = Number.isFinite(rsrq) && rsrq <= 5 && rsrq > -40;
+
+                        if (!validType || !validFreq || !validPci || !validRsrp || !validRsrq) continue;
+
+                        lteBlocks.push({
+                            typeCode,
+                            bandCode: Number.isFinite(bandCode) ? bandCode : null,
+                            freq: Math.round(freq),
+                            sc: pci,
+                            pci,
+                            rscp: rsrp,
+                            rsrp,
+                            ecno: rsrq,
+                            rsrq,
+                            rawPower: Number.isFinite(auxPower) ? auxPower : null,
+                            rssi: null,
+                            sinr: Number.isFinite(sinr) ? sinr : (Number.isFinite(auxMetric) ? auxMetric : null),
+                            cellId: Number.isFinite(cellIdentity) ? cellIdentity : null
+                        });
+                    }
+
+                    if (lteBlocks.length) {
+                        const servingBlock = lteBlocks.find((b, idx) => (
+                            (Number.isFinite(servingFreq) && Number.isFinite(b.freq) && Math.round(servingFreq) === b.freq && Number.isFinite(servingSc) && servingSc === b.pci) ||
+                            (idx === 0)
+                        ));
+                        if (servingBlock) {
+                            servingFreq = servingBlock.freq;
+                            servingSc = servingBlock.pci;
+                            servingLevel = servingBlock.rsrp;
+                            servingEcNo = servingBlock.rsrq;
+                            if (Number.isFinite(servingBlock.sinr) && servingBlock.sinr >= -30 && servingBlock.sinr <= 60) {
+                                latestLteSinr = servingBlock.sinr;
+                            }
+                        }
+
+                        lteBlocks.forEach((b) => {
+                            const isServing = Number.isFinite(servingSc) && Number.isFinite(servingFreq) && b.pci === servingSc && b.freq === Math.round(servingFreq);
+                            const key = `${b.freq}:${b.pci}`;
+                            const existing = lteNeighborsMap.get(key);
+                            if (!existing || (Number.isFinite(b.rsrp) && (!Number.isFinite(existing.rsrp) || b.rsrp > existing.rsrp))) {
+                                lteNeighborsMap.set(key, {
+                                    ...b,
+                                    isServing,
+                                    source_kind: 'measured'
+                                });
+                            }
+                        });
+                    }
+                    neighbors = Array.from(lteNeighborsMap.values());
+                } else {
+                    // Fallback
+                    servingFreq = parseFloat(parts[7]);
+                    servingLevel = parseFloat(parts[8]);
+                    servingSc = parts[9];
+                    activeSetCount = parseInt(parts[5]) || 1;
+                }
+
+                // SANITY CHECK: Swap if indices are misaligned
+                if (servingLevel > -15 && servingFreq < -50) {
+                    let tmp = servingFreq; servingFreq = servingLevel; servingLevel = tmp;
+                }
+
+                let rnc = state.rnc;
+                if ((!rnc || isNaN(rnc)) && state.cid > 65535) {
+                    rnc = state.cid >> 16;
+                }
+                const cid = (state.cid && !isNaN(state.cid)) ? (state.cid & 0xFFFF) : null;
+
+                const point = {
+                    lat: gps.lat, lng: gps.lng, time,
+                    type: 'MEASUREMENT', level: servingLevel, ecno: servingEcNo, sc: servingSc, freq: servingFreq,
+                    cellId: state.cid, rnc: rnc, cid: cid, lac: state.lac,
+                        parsed: {
+                            serving: {
+                                freq: servingFreq, [techId === 5 ? 'rscp' : 'rsrp']: servingLevel, band: servingBand, sc: servingSc,
+                                [techId === 5 ? 'ecno' : 'rsrq']: servingEcNo, lac: state.lac, cellId: state.cid, rnc: rnc, cid: cid
+                            },
+                            neighbors,
+                            ...(techId === 5 && umtsCellmeasSubtypeStats ? {
+                                cellmeas: {
+                                    neighborSubtypeAcount: umtsCellmeasSubtypeStats.subtypeAcount,
+                                    neighborSubtypeBcount: umtsCellmeasSubtypeStats.subtypeBcount,
+                                    neighborRscpAvailable: umtsCellmeasSubtypeStats.rscpAvailable
+                                }
+                            } : {})
+                        },
+                        properties: {
+                            'Time': time,
+                            'Tech': techId === 5 ? 'UMTS' : (techId === 7 ? 'LTE' : 'Unknown'),
+                        'Cell ID': state.cid,
+                        'RNC': rnc,
+                        'CID': cid,
+                        'LAC': state.lac,
+                        'Freq': (servingFreq !== null ? servingFreq : 'N/A'),
+                        'RNC/CID': (rnc !== null && cid !== null) ? `${rnc}/${cid}` : 'N/A',
+                        [techId === 5 ? 'Serving RSCP' : 'Serving RSRP']: servingLevel,
+                        'Serving SC': servingSc,
+                        [techId === 5 ? 'EcNo' : 'RSRQ']: servingEcNo,
+                        'RRC State': currentRrcState,
+                        'RSSI': valRssi,
+                            'UE Tx Power': latestUeTxPower,
+                            'NodeB Tx Power': latestNodeBTxPower,
+                            'TPC': latestTpc
+                        }
+                    };
+                if (techId === 7) {
+                    point.rsrp = servingLevel;
+                    point.rsrq = servingEcNo;
+                    point.pci = servingSc;
+                    point.earfcn = servingFreq;
+                    point.band = servingBand;
+                    point.tac = state.lac;
+                    if (Number.isFinite(latestLteSinr)) point.sinr = latestLteSinr;
+                    if (Number.isFinite(latestTimingAdvance)) point.timingAdvance = latestTimingAdvance;
+                    if (Number.isFinite(latestCqiDl)) point.cqi_dl = latestCqiDl;
+                    if (Number.isFinite(latestBlerDl)) point.bler_dl = latestBlerDl;
+                    if (Number.isFinite(latestBlerUl)) point.bler_ul = latestBlerUl;
+                    point.properties['Serving PCI'] = servingSc;
+                    point.properties['Serving EARFCN'] = (servingFreq !== null ? servingFreq : 'N/A');
+                    point.properties['Serving RSRQ'] = servingEcNo;
+                    point.properties['Serving TAC'] = state.lac;
+                    point.properties['Band'] = servingBand || 'N/A';
+                    if (Number.isFinite(latestLteSinr)) point.properties['SINR'] = latestLteSinr;
+                    if (Number.isFinite(latestTimingAdvance)) point.properties['Timing Advance'] = latestTimingAdvance;
+                    if (Number.isFinite(latestCqiDl)) point.properties['CQI (DL)'] = latestCqiDl;
+                    if (Number.isFinite(latestBlerDl)) point.properties['BLER DL'] = latestBlerDl;
+                    if (Number.isFinite(latestBlerUl)) point.properties['BLER UL'] = latestBlerUl;
+                }
+                if (techId === 5 && umtsCellmeasSubtypeStats) {
+                    point.properties['CELLMEAS Neighbor RSCP'] = umtsCellmeasSubtypeStats.rscpAvailable
+                        ? 'Available (Subtype A/B present)'
+                        : 'Unavailable (unsupported CELLMEAS subtype)';
+                    point.properties['CELLMEAS Neighbor Subtypes'] = `A:${umtsCellmeasSubtypeStats.subtypeAcount}, B:${umtsCellmeasSubtypeStats.subtypeBcount}`;
+                }
+
+                // Detect AS Add / Remove Events
+                if (lastAsSize !== null && activeSetCount !== lastAsSize) {
+                    const eventName = activeSetCount > lastAsSize ? 'AS Add' : 'AS Remove';
+                    allPoints.push({
+                        lat: gps.lat, lng: gps.lng, time,
+                        type: 'EVENT', event: eventName,
+                        message: `Size: ${lastAsSize} -> ${activeSetCount}`,
+                        properties: {
+                            'Time': time, 'Type': 'EVENT',
+                            'Event': eventName,
+                            'AS Event': eventName,
+                            'Details': `Active Set size changed from ${lastAsSize} to ${activeSetCount}`,
+                            'rrc_rel_cause': state.rrc_cause || 'N/A',
+                            'cs_rel_cause': state.cs_cause || 'N/A',
+                            'iucs_status': state.iucs_status || 'N/A'
+                        }
+                    });
+                }
+                lastAsSize = activeSetCount;
+
+                point.properties['Active Set Size'] = activeSetCount;
+                point.as_size = activeSetCount;
+                point.activeSetCount = activeSetCount;
+
+                if (neighbors && neighbors.length > 0) {
+                    currentNeighbors = neighbors;
+                }
+
+                // Flatten Neighbors with A/M/D logic
+                if (neighbors && neighbors.length > 0) {
+                    const cleanNeighbors = neighbors.filter(n => !n.isServing);
+
+                    cleanNeighbors.forEach((n, idx) => {
+                        let prefix = 'd';
+                        let num = 0;
+                        if (techId === 5 && typeof n.type === 'string') {
+                            const t = String(n.type).trim().toUpperCase();
+                            prefix = t.startsWith('A') ? 'a' : (t.startsWith('M') ? 'm' : 'd');
+                            const parsedNum = parseInt(t.slice(1), 10);
+                            num = Number.isFinite(parsedNum) ? parsedNum : (idx + 1);
+                        } else {
+                            const numActiveNeighbors = Math.max(0, activeSetCount - 1);
+                            if (idx < numActiveNeighbors) {
+                                prefix = 'a';
+                                num = idx + 2;
+                            } else if (idx < (numActiveNeighbors + monitoredSetCount)) {
+                                prefix = 'm';
+                                num = idx - numActiveNeighbors + 1;
+                            } else {
+                                prefix = 'd';
+                                num = idx - (numActiveNeighbors + monitoredSetCount) + 1;
+                            }
+                            if (!n.type) {
+                                n.type = prefix.toUpperCase() + num;
+                                n.name = n.type;
+                            }
+                        }
+
+                        // Limit valid count to avoid spam (12 max usually enough)
+                        if (num > 16) return;
+
+                        const keyBase = `${prefix}${num}`;
+                        const sc = Number.isFinite(n.sc) ? n.sc : (Number.isFinite(n.pci) ? n.pci : (Number.isFinite(n.psc) ? n.psc : null));
+
+                        point[`${keyBase}_rscp`] = n.rscp;
+                        point[`${keyBase}_ecno`] = n.ecno;
+                        point[`${keyBase}_sc`] = sc;
+                        point[`${keyBase}_freq`] = n.freq;
+                        if (techId === 7) {
+                            point[`${keyBase}_rsrp`] = n.rscp;
+                            point[`${keyBase}_rsrq`] = n.ecno;
+                            point[`${keyBase}_pci`] = sc;
+                            point[`${keyBase}_earfcn`] = n.freq;
+                        }
+
+                        // Add aliases for UI Trend Charts (N1, N2, N3)
+                        if (idx < 3) {
+                            const cIdx = idx + 1;
+                            point[`n${cIdx}_sc`] = sc;
+                            point[`n${cIdx}_rscp`] = n.rscp;
+                            point[`n${cIdx}_ecno`] = n.ecno;
+                            point[`n${cIdx}_freq`] = n.freq;
+                            if (techId === 7) {
+                                point[`n${cIdx}_pci`] = sc;
+                                point[`n${cIdx}_rsrp`] = n.rscp;
+                                point[`n${cIdx}_rsrq`] = n.ecno;
+                                point[`n${cIdx}_earfcn`] = n.freq;
+                            }
+                        }
+
+                        // Add to properties for Popup
+                        point.properties[`${prefix.toUpperCase()}${num} SC`] = sc;
+                        point.properties[`${prefix.toUpperCase()}${num} RSCP`] = n.rscp;
+                        point.properties[`${prefix.toUpperCase()}${num} EcNo`] = n.ecno;
+                        if (techId === 7) {
+                            point.properties[`${prefix.toUpperCase()}${num} PCI`] = sc;
+                            point.properties[`${prefix.toUpperCase()}${num} RSRP`] = n.rscp;
+                            point.properties[`${prefix.toUpperCase()}${num} RSRQ`] = n.ecno;
+                            point.properties[`${prefix.toUpperCase()}${num} EARFCN`] = n.freq;
+                        }
+                        if (Number.isFinite(n.rssi)) {
+                            point.properties[`${prefix.toUpperCase()}${num} RSSI`] = n.rssi;
+                        }
+                    });
+                }
+
+                allPoints.push(point);
+
+            } else if (header.toUpperCase().includes('RRC') || header.toUpperCase().includes('L3')) {
+                const inferDirectionFromMessage = (msg) => {
+                    const m = String(msg || '').toUpperCase();
+                    if (m.includes('UPLINK')) return 'UL';
+                    if (m.includes('DOWNLINK')) return 'DL';
+                    if (m.includes('SERVICE_REQUEST')) return 'UL';
+                    if (m.includes('SERVICE_ACCEPT')) return 'DL';
+                    if (m.includes('PDP_CONTEXT_REQUEST')) return 'UL';
+                    if (m.includes('PDP_CONTEXT_ACCEPT')) return 'DL';
+                    if (m.includes('MODIFY_PDP_CONTEXT_REQUEST')) return 'UL';
+                    if (m.includes('MODIFY_PDP_CONTEXT_ACCEPT')) return 'DL';
+                    if (m.includes('RRC_CONNECTION_REQUEST')) return 'UL';
+                    if (m.includes('RRC_CONNECTION_SETUP')) return 'DL';
+                    if (m.includes('RRC_CONNECTION_SETUP_COMPLETE')) return 'UL';
+                    if (m.includes('RRC_CONNECTION_RELEASE')) return 'DL';
+                    if (m.includes('SYSTEM_INFORMATION')) return 'DL';
+                    if (m.includes('MEASUREMENT_CONTROL')) return 'DL';
+                    if (m.includes('MEASUREMENT_REPORT')) return 'UL';
+                    if (m.includes('SECURITY_MODE_COMMAND')) return 'DL';
+                    if (m.includes('SECURITY_MODE_COMPLETE')) return 'UL';
+                    if (m.includes('IDENTITY_REQUEST')) return 'DL';
+                    if (m.includes('IDENTITY_RESPONSE')) return 'UL';
+                    if (m.includes('AUTHENTICATION_REQUEST')) return 'DL';
+                    if (m.includes('AUTHENTICATION_RESPONSE')) return 'UL';
+                    if (m.includes('LOCATION_UPDATE_REQUEST')) return 'UL';
+                    if (m.includes('LOCATION_UPDATE_ACCEPT')) return 'DL';
+                    if (m.includes('ROUTING_AREA_UPDATE_REQUEST')) return 'UL';
+                    if (m.includes('ROUTING_AREA_UPDATE_ACCEPT')) return 'DL';
+                    if (m.includes('CM_SERVICE_REQUEST')) return 'UL';
+                    if (m.includes('CALL_PROCEEDING')) return 'DL';
+                    if (m.includes('SETUP') && !m.includes('SETUP_COMPLETE')) return 'UL';
+                    return undefined;
+                };
+                // Heuristic for message name
+                let message = 'Unknown';
+                for (let k = 2; k < parts.length; k++) {
+                    const p = parts[k].trim();
+                    if (p.length > 5 && !/^\d+$/.test(p)) { message = p; break; }
+                }
+                if (parts[5]) {
+                    const m = parts[5].replace(/^"|"$/g, '');
+                    if (m && !/^\d+$/.test(m)) message = m;
+                }
+
+                const channel = parts[6] ? parts[6].replace(/^"|"$/g, '') : undefined;
+                const freq = parts[7] ? parseFloat(parts[7]) : undefined;
+                const sc = parts[8] ? parseInt(parts[8]) : undefined;
+                // Direction: try from raw line or infer from message
+                let direction = null;
+                const lineUpper = line.toUpperCase();
+                if (lineUpper.includes('UPLINK')) direction = 'UL';
+                else if (lineUpper.includes('DOWNLINK')) direction = 'DL';
+                if (!direction && parts.length > 2) {
+                    if (parts[2] === '0') direction = 'DL';
+                    if (parts[2] === '1') direction = 'UL';
+                }
+                if (!direction && parts.length > 4) {
+                    if (parts[4] === '1') direction = 'UL';
+                    if (parts[4] === '2') direction = 'DL';
+                }
+                if (!direction) direction = inferDirectionFromMessage(message);
+
+                const payloadHex = (() => {
+                    const candidate = String(parts[parts.length - 1] || '').replace(/^"|"$/g, '').trim();
+                    return (/^[0-9A-F]+$/i.test(candidate) && candidate.length >= 16) ? candidate : '';
+                })();
+                const eventName = String(message || '').trim() || 'Unknown';
+                allPoints.push({
+                    lat: gps ? gps.lat : null, lng: gps ? gps.lng : null,
+                    time, type: 'SIGNALING', event: eventName, event_name: eventName, message, details: line,
+                    radioSnapshot: { cellId: state.cid, lac: state.lac, psc: state.psc, rnc: state.rnc, neighbors: currentNeighbors.slice(0, 8) },
+                    rrc_rel_cause: state.rrc_cause || 'N/A',
+                    cs_rel_cause: state.cs_cause || 'N/A',
+                    direction: direction || 'N/A',
+                    channel: channel || 'N/A',
+                    freq: !isNaN(freq) ? freq : 'N/A',
+                    sc: !isNaN(sc) ? sc : 'N/A',
+                    properties: {
+                        'Time': time,
+                        'Type': 'SIGNALING',
+                        'Event': eventName,
+                        'Message': message,
+                        'RRC Release Cause': state.rrc_cause || 'N/A',
+                        'CS Release Cause': state.cs_cause || 'N/A',
+                        'Direction': direction || 'N/A',
+                        'Channel': channel || 'N/A',
+                        'Freq': !isNaN(freq) ? freq : 'N/A',
+                        'SC': !isNaN(sc) ? sc : 'N/A',
+                        ...(payloadHex ? { 'RRC raw payload hex': payloadHex } : {})
+                    }
+                });
+            } else if (upperHeader === 'RLCBLER' || upperHeader === 'MACBLER') {
+                if (gps && parts.length > 10) {
+                    // Indexes: 4 -> BLER DL, 10 -> BLER UL (Based on User NMF: "RLCBLER,Time,,5,0.0,..." -> 5=tech, 0.0=DL BLER?)
+                    // NMF Format: RLCBLER,Time,,Tech,DL_BLER,Blocks_DL,Err_DL,?,DL_Thru?,UL_BLER...
+                    // User Example: RLCBLER,10:21:36.788,,5,0.0,100,0,2,4,1,0.0,100,0,32,0.0,0,0
+                    // Part 4 is 0.0 (DL BLER likely)
+                    // Part 10 is 0.0 (UL BLER likely)
+
+                    const tech = parseInt(parts[3]);
+                    const dlBler = parseFloat(parts[4]);
+                    const ulBler = parseFloat(parts[10]);
+
+                    if (!isNaN(dlBler) || !isNaN(ulBler)) {
+                        if (!isNaN(dlBler)) latestBlerDl = dlBler;
+                        if (!isNaN(ulBler)) latestBlerUl = ulBler;
+                        allPoints.push({
+                            lat: gps.lat, lng: gps.lng, time,
+                            type: 'MEASUREMENT', // Treat as measurement to allow coloring
+                            bler_dl: !isNaN(dlBler) ? dlBler : undefined,
+                            bler_ul: !isNaN(ulBler) ? ulBler : undefined,
+                            cellId: state.cid,
+                            properties: {
+                                'Time': time,
+                                'Tech': tech === 5 ? 'UMTS' : 'LTE',
+                                'Cell ID': state.cid,
+                                'BLER DL': !isNaN(dlBler) ? dlBler : 'N/A',
+                                'BLER UL': !isNaN(ulBler) ? ulBler : 'N/A'
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        const measurementPoints = allPoints.filter(p => p.type === 'MEASUREMENT');
+        const signalingPoints = allPoints.filter(p => p.type === 'SIGNALING');
+        const eventPoints = allPoints.filter(p => p.type === 'EVENT');
+
+        // Detect Technology based on measurements
+        let detectedTech = 'Unknown';
+        if (measurementPoints.length > 0) {
+            const sample = measurementPoints.slice(0, 50);
+            const freqs = sample.map(p => p.freq).filter(f => !isNaN(f) && f > 0);
+            if (freqs.length > 0) {
+                const is3G = freqs.some(f => (f >= 10500 && f <= 10900) || (f >= 2900 && f <= 3100) || (f >= 4300 && f <= 4500));
+                if (is3G) {
+                    detectedTech = '3G (UMTS)';
+                } else {
+                    const avgFreq = freqs.reduce((a, b) => a + b, 0) / freqs.length;
+                    if (avgFreq < 1000) detectedTech = '2G (GSM)';
+                    else if (avgFreq > 120000) detectedTech = '5G (NR)';
+                    else detectedTech = '4G (LTE)';
+                }
+            }
+        }
+
+        // Build dynamic metric list based on actual data in the file
+        const metricSet = new Set();
+        const excludeKeys = new Set([
+            'lat', 'lng', 'time', 'type', 'parsed', 'geometry', 'properties',
+            'event', 'message', 'timestamp', 'tech', 'source',
+            'details', 'radioSnapshot'
+        ]);
+        const shouldExcludePropKey = (k) => /^(time|tech|type|lat|lng|lon|long|latitude|longitude|gps|event|message|details|radiosnapshot|rnc\/cid)$/i.test(k);
+
+        const normalizeKey = (k) => String(k).toLowerCase().replace(/[\s_]+/g, ' ').trim();
+        const canonicalizeKey = (k) => {
+            const nk = normalizeKey(k);
+            const admMatch = nk.match(/^(a|m|d|n)\s*(\d+)\s*(rscp|ecno|sc|freq|rsrp|rsrq|pci|earfcn)$/);
+            if (admMatch) return `${admMatch[1]}${admMatch[2]}_${admMatch[3]}`;
+
+            const map = {
+                'cell id': 'Cell ID',
+                'cellid': 'Cell ID',
+                'cid': 'Cell ID',
+                'rnc': 'RNC',
+                'lac': 'LAC',
+                'freq': 'Freq',
+                'ecno': 'EcNo',
+                'rssi': 'RSSI',
+                'ue tx power': 'UE Tx Power',
+                'nodeb tx power': 'NodeB Tx Power',
+                'bler dl': 'BLER DL',
+                'bler ul': 'BLER UL',
+                'rrc state': 'RRC State',
+                'ho command': 'HO Command',
+                'ho completion': 'HO Completion',
+                'as event': 'AS Event',
+                'active set size': 'Active Set Size',
+                'as size': 'Active Set Size',
+                'tpc': 'TPC',
+                'serving rscp': 'Serving RSCP',
+                'serving sc': 'Serving SC',
+                'serving ecno': 'Serving EcNo',
+                'serving rnc': 'Serving RNC',
+                'serving lac': 'Serving LAC',
+                'serving freq': 'Serving Freq',
+                'serving rsrp': 'Serving RSRP',
+                'serving rsrq': 'Serving RSRQ',
+                'serving pci': 'Serving PCI',
+                'serving earfcn': 'Serving EARFCN',
+                'serving tac': 'Serving TAC',
+                'rsrp': 'Serving RSRP',
+                'rsrq': 'Serving RSRQ',
+                'pci': 'Serving PCI',
+                'earfcn': 'Serving EARFCN',
+                'tac': 'Serving TAC'
+            };
+            return map[nk] || k;
+        };
+
+        const addPointMetrics = (p) => {
+            if (!p) return;
+            Object.keys(p).forEach(k => {
+                if (excludeKeys.has(k)) return;
+                const v = p[k];
+                if (v === undefined || v === null || v === '') return;
+                metricSet.add(canonicalizeKey(k));
+            });
+            if (p.properties) {
+                Object.keys(p.properties).forEach(k => {
+                    if (shouldExcludePropKey(k)) return;
+                    const v = p.properties[k];
+                    if (v === undefined || v === null || v === '') return;
+                    metricSet.add(canonicalizeKey(k));
+                });
+            }
+        };
+
+        measurementPoints.forEach(addPointMetrics);
+        signalingPoints.forEach(addPointMetrics);
+        eventPoints.forEach(p => {
+            addPointMetrics(p);
+            if (p.event) metricSet.add(p.event); // Add event names as metric buttons
+        });
+
+        const customMetrics = Array.from(metricSet);
+        const callHeaderSet = new Set(['CAA', 'CAC', 'CAD', 'CAF', 'CARE']);
+        const hasCallMarkers = String(content || '').split(/\r?\n/).some((line) => {
+            const hdr = String(line || '').split(',', 1)[0].trim().toUpperCase();
+            return callHeaderSet.has(hdr);
+        });
+
+        let callSessions = [];
+        let umtsCallAnalysis = null;
+        if (hasCallMarkers) {
+            umtsCallAnalysis = UmtsCallAnalyzer.analyze(content, { windowSeconds: 10 });
+            callSessions = UmtsCallAnalyzer.toUiSessions(umtsCallAnalysis);
+        }
+
+        return {
+            points: measurementPoints.concat(eventPoints),
+            signaling: signalingPoints,
+            events: eventPoints,
+            callSessions,
+            umtsCallAnalysis,
+            tech: detectedTech,
+            config: this.detected1AConfig || null,
+            configHistory: this.event1AHistory || [],
+            customMetrics: customMetrics // Dynamic list based on actual file content
+        };
+    }
+
+};
+
+const ExcelParser = {
+    async parseAsync(arrayBuffer, onProgress) {
+        if (onProgress) onProgress(5, 'Reading file structure...');
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        
+        if (onProgress) onProgress(15, 'Extracting worksheets...');
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const json = XLSX.utils.sheet_to_json(worksheet, { defval: "" }); // defval to keep empty/nulls safely
+
+        if (json.length === 0) return { points: [], tech: 'Unknown', customMetrics: [] };
+
+        if (onProgress) onProgress(25, 'Analyzing headers...');
+        // 1. Identify Key Columns (Time, Lat, Lon)
+        const keysSet = new Set();
+        if (json && json.length > 0) {
+            const scanLimit = Math.min(json.length, 50);
+            for (let i = 0; i < scanLimit; i++) {
+                Object.keys(json[i]).forEach(k => keysSet.add(k));
+            }
+        }
+        const keys = Array.from(keysSet);
+        const normalize = k => k.toLowerCase().replace(/[\s_\.]/g, '');
+
+        let timeKey = keys.find(k => /^(time|timestamp|date|datetime)$/i.test(normalize(k)) || /time/i.test(normalize(k)));
+        let latKey = keys.find(k => /^(lat|latitude|y_coord|y|cgpslat|cgpslatitude)$/i.test(normalize(k)) || /latitude/i.test(normalize(k)));
+        let lngKey = keys.find(k => /^(lon|long|longitude|lng|x_coord|x|cgpslon|cgpslongitude)$/i.test(normalize(k)) || /longitude/i.test(normalize(k)));
+
+        const customMetrics = [...keys];
+
+        const detectBestColumn = (candidates, exclusions = []) => {
+            const isExcluded = (n) => {
+                if (n.includes('serving') || n.includes('bestactive')) return false;
+                if (exclusions.some(ex => n.includes(ex))) return true;
+                if (n.includes('as') && !n.includes('meas') && !n.includes('class') && !n.includes('phase') && !n.includes('pass') && !n.includes('alias')) return true;
+                if (/\bn\d/.test(n) || /^n\d/.test(n)) return true;
+                return false;
+            };
+            for (let cand of candidates) {
+                let match = keys.find(k => {
+                    const n = normalize(k);
+                    if (isExcluded(n)) return false;
+                    return n === cand || n === normalize(cand);
+                });
+                if (match) return match;
+                match = keys.find(k => {
+                    const n = normalize(k);
+                    if (isExcluded(n)) return false;
+                    return n.includes(cand);
+                });
+                if (match) return match;
+            }
+            return null;
+        };
+
+        const scCol = detectBestColumn(['servingcellidentity', 'servingcellsc', 'servingsc', 'primarysc', 'primarypci', 'dl_pci', 'dl_sc', 'bestsc', 'bestpci', 'sc', 'pci', 'psc', 'scramblingcode', 'physicalcellid', 'physicalcellidentity', 'phycellid'], ['active', 'set', 'neighbor', 'target', 'candidate']);
+        const levelCol = detectBestColumn(['servingcellrsrp', 'servingrsrp', 'rsrp', 'bestactiverscp', 'rscp', 'level'], ['active', 'set', 'neighbor']);
+        const ecnoCol = detectBestColumn(['servingcellrsrq', 'servingrsrq', 'rsrq', 'bestactiveec/n0', 'bestactiveecn0', 'bestecno', 'ecno', 'sinr'], ['active', 'set', 'neighbor']);
+        const freqCol = detectBestColumn(['servingcelldlearfcn', 'earfcn', 'uarfcn', 'freq', 'channel', 'ch'], ['active', 'set', 'neighbor']);
+        const bandCol = detectBestColumn(['band'], ['active', 'set', 'neighbor']);
+        const servingCellNameCol = detectBestColumn(['servingcellname'], ['cellid']);
+        const cellIdCol = detectBestColumn(['enodeb id-cell id', 'enodebid-cellid', 'nodeb id-cell id', 'cellid', 'ci', 'cid', 'cell_id', 'identity'], ['active', 'set', 'neighbor', 'target']);
+        const effectiveCellIdCol = (cellIdCol && cellIdCol === scCol) ? null : cellIdCol;
+
+        const lteServingRsrpCol = detectBestColumn(['lteservingrsrp']);
+        const lteServingRsrqCol = detectBestColumn(['lteservingrsrq']);
+        const lteServingSinrCol = detectBestColumn(['lteservingsinr']);
+        const lteServingPciCol = detectBestColumn(['lteservingpci/sc', 'lteservingpci']);
+        const lteServingEarfcnCol = detectBestColumn(['lteservingearfcn']);
+        const umtsServingRscpCol = detectBestColumn(['3gservingrscp']);
+        const umtsServingEcnoCol = detectBestColumn(['3gservingecno']);
+        const umtsServingScCol = detectBestColumn(['3gservingsc', '3gservingpci/sc']);
+        const umtsServingFreqCol = detectBestColumn(['3gservingfreq']);
+        const gsmServingRxlevCol = detectBestColumn(['2grxlevsub', '2gservingrxlev']);
+        const gsmServingRxqualCol = detectBestColumn(['2grxqualsub', '2gservingrxqual']);
+        const gsmServingArfcnCol = detectBestColumn(['2garfcn']);
+        const gsmServingBsicCol = detectBestColumn(['2gbsic']);
+
+        const dlThputCol = detectBestColumn(['averagedlthroughput', 'dlthroughput', 'downlinkthroughput'], []);
+        const ulThputCol = detectBestColumn(['averageulthroughput', 'ulthroughput', 'uplinkthroughput'], []);
+
+        const parseNumber = (val) => {
+            if (typeof val === 'number') return val;
+            if (typeof val === 'string') {
+                const clean = val.trim().replace(',', '.');
+                const f = parseFloat(clean);
+                return isNaN(f) ? NaN : f;
+            }
+            return NaN;
+        };
+
+        const toTimeStringFromDayFraction = (fraction) => {
+            if (!Number.isFinite(fraction)) return null;
+            const dayMs = 24 * 60 * 60 * 1000;
+            let ms = Math.round((((fraction % 1) + 1) % 1) * dayMs);
+            if (ms >= dayMs) ms = 0;
+            const hh = Math.floor(ms / 3600000);
+            ms -= hh * 3600000;
+            const mm = Math.floor(ms / 60000);
+            ms -= mm * 60000;
+            const ss = Math.floor(ms / 1000);
+            ms -= ss * 1000;
+            return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+        };
+
+        const normalizeTimeValue = (value) => {
+            if (value === undefined || value === null || value === '') return 'N/A';
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                if ((value > 20000 && value < 90000) || (value >= 0 && value < 1)) {
+                    const out = toTimeStringFromDayFraction(value);
+                    if (out) return out;
+                }
+                return String(value);
+            }
+            const s = String(value).trim();
+            if (!s) return 'N/A';
+            if (/^-?\d+(\.\d+)?$/.test(s)) {
+                const n = parseFloat(s);
+                if (Number.isFinite(n) && ((n > 20000 && n < 90000) || (n >= 0 && n < 1))) {
+                    const out = toTimeStringFromDayFraction(n);
+                    if (out) return out;
+                }
+            }
+            return s;
+        };
+
+        // Nemo/Keysight MOS exports store the audio sample and the radio
+        // context on separate rows sharing the exact same timestamp.  Treating
+        // every spreadsheet row as a map sample creates tens of thousands of
+        // empty MOS points and loses the serving carrier on the actual audio
+        // sample.  Detect this schema explicitly and collapse each timestamp
+        // into one geolocated MOS observation enriched with its LTE/NR context.
+        const findColumnByNormalizedName = (...wanted) => {
+            const wantedSet = new Set(wanted.map(normalize));
+            return keys.find(k => wantedSet.has(normalize(k))) || null;
+        };
+        const mosCol = findColumnByNormalizedName('Audio quality MOS DL', 'MOS DL', 'MOS');
+        const cellTypeCol = findColumnByNormalizedName('Cell type');
+        // This export carries NR values in the block to the left of Cell type
+        // and LTE values in the block beginning with Cell type (column Z in
+        // the supplied IAM workbook).  Keep both families explicit: a generic
+        // `RSRP` lookup alone cannot tell which RAT it belongs to.
+        const nrRsrpMetricCol = findColumnByNormalizedName('1. best RSRP', 'NR RSRP', 'SS-RSRP');
+        const nrRsrqMetricCol = findColumnByNormalizedName('1. best RSRQ', 'NR RSRQ', 'SS-RSRQ');
+        const nrSinrMetricCol = findColumnByNormalizedName('1. best SS-SINR', 'NR SS-SINR', 'SS-SINR');
+        const lteRsrpMetricCol = findColumnByNormalizedName('LTE RSRP', 'RSRP');
+        const lteRsrqMetricCol = findColumnByNormalizedName('LTE RSRQ', 'RSRQ');
+        const lteSinrMetricCol = findColumnByNormalizedName('LTE SINR', 'SINR');
+        // Some Nemo exports use two unnamed `Ch` / `PCI` column pairs. XLSX
+        // disambiguates the second pair as `Ch_1` / `PCI_2`; it is the LTE
+        // anchor, while the first `NR-ARFCN` / `PCI` pair is the NR SCG.
+        // Keep these identities separate instead of letting generic column
+        // detection combine an NR PCI with an LTE channel.
+        const lteChannelCol = findColumnByNormalizedName('LTE channel number') ||
+            findColumnByNormalizedName('Ch_1');
+        const ltePciCol = findColumnByNormalizedName('LTE PCI') ||
+            findColumnByNormalizedName('PCI_2');
+        // Some MOS exports have the LTE measurements in the first Ch/PCI
+        // block while the named LTE columns are present but empty.
+        const genericLteChannelCol = findColumnByNormalizedName('Ch');
+        const genericLtePciCol = findColumnByNormalizedName('PCI');
+        const lteBwCol = findColumnByNormalizedName('LTE BW');
+        const nrChannelCol = findColumnByNormalizedName('NR channel number') ||
+            findColumnByNormalizedName('NR-ARFCN');
+        const nrPciCol = findColumnByNormalizedName('NR PCI') ||
+            findColumnByNormalizedName('PCI');
+        const beamIndexCol = findColumnByNormalizedName('Beam index');
+        const beamTypeCol = findColumnByNormalizedName('Beam type');
+        const bandMhzCol = findColumnByNormalizedName('Band (MHz)') ||
+            findColumnByNormalizedName('Band (MHz)_1_');
+        const systemCol = findColumnByNormalizedName('System');
+        const measurementTitleCol = findColumnByNormalizedName('Measurement Title');
+        const lteBandCol = findColumnByNormalizedName('LTE Band') ||
+            findColumnByNormalizedName('Band_1_') || bandCol;
+        const nrBandCol = findColumnByNormalizedName('NR Band') ||
+            findColumnByNormalizedName('Band') || bandCol;
+        const genericBandCol = findColumnByNormalizedName('Band');
+        const isCompactEndcMosSchema = !!(
+            mosCol && cellTypeCol && timeKey && latKey && lngKey &&
+            findColumnByNormalizedName('NR-ARFCN') &&
+            findColumnByNormalizedName('Ch_1') &&
+            findColumnByNormalizedName('PCI_2') &&
+            json.some(row => Number.isFinite(parseNumber(row[findColumnByNormalizedName('NR-ARFCN')])) &&
+                Number.isFinite(parseNumber(row[findColumnByNormalizedName('Ch_1')])) &&
+                Number.isFinite(parseNumber(row[findColumnByNormalizedName('PCI_2')])))
+        );
+        const isMosServingSchema = !!(
+            mosCol && cellTypeCol && timeKey && latKey && lngKey &&
+            (lteChannelCol || genericLteChannelCol || nrChannelCol)
+        );
+
+        if (isMosServingSchema) {
+            if (onProgress) onProgress(35, 'Associating MOS samples with serving cells...');
+
+            const isPresent = value => value !== undefined && value !== null && String(value).trim() !== '';
+            const finiteOrNull = value => {
+                if (!isPresent(value)) return null;
+                const parsed = parseNumber(value);
+                return Number.isFinite(parsed) ? parsed : null;
+            };
+            const integerOrNull = value => {
+                const parsed = finiteOrNull(value);
+                return parsed === null ? null : Math.trunc(parsed);
+            };
+            const lteChannelFromRow = row => finiteOrNull(row[lteChannelCol]) ??
+                (isCompactEndcMosSchema ? null : finiteOrNull(row[genericLteChannelCol]));
+            const ltePciFromRow = row => integerOrNull(row[ltePciCol]) ??
+                (isCompactEndcMosSchema ? null : integerOrNull(row[genericLtePciCol]));
+            const lteBandFromRow = row => row[lteBandCol] ||
+                (isCompactEndcMosSchema ? null : row[genericBandCol]) || null;
+            const timeBucketKey = value => {
+                if (value instanceof Date) return `date:${value.getTime()}`;
+                if (typeof value === 'number' && Number.isFinite(value)) return `num:${value.toPrecision(15)}`;
+                return `text:${String(value === undefined || value === null ? '' : value).trim()}`;
+            };
+            const radioIdentity = (type, row) => {
+                const isNr = /^NR\b/i.test(type);
+                return [
+                String(type || '').trim().toLowerCase(),
+                systemCol ? String(row[systemCol] || '').trim().toUpperCase() : '',
+                lteChannelFromRow(row) ?? '',
+                ltePciFromRow(row) ?? '',
+                nrChannelCol ? row[nrChannelCol] : '',
+                nrPciCol ? row[nrPciCol] : '',
+                beamIndexCol ? row[beamIndexCol] : '',
+                isNr ? (nrBandCol ? row[nrBandCol] : '') : lteBandFromRow(row),
+                isNr && nrRsrpMetricCol ? row[nrRsrpMetricCol] : '',
+                isNr && nrRsrqMetricCol ? row[nrRsrqMetricCol] : '',
+                isNr && nrSinrMetricCol ? row[nrSinrMetricCol] : '',
+                !isNr && lteRsrpMetricCol ? row[lteRsrpMetricCol] : '',
+                !isNr && lteRsrqMetricCol ? row[lteRsrqMetricCol] : '',
+                !isNr && lteSinrMetricCol ? row[lteSinrMetricCol] : '',
+                latKey ? finiteOrNull(row[latKey]) : '',
+                lngKey ? finiteOrNull(row[lngKey]) : ''
+                ].join('|');
+            };
+            const toRadioCell = (row, type, rowIndex) => {
+                const isNr = /^NR\b/i.test(type);
+                const cellNameCol = findColumnByNormalizedName('Cell name');
+                return {
+                    type: type,
+                    rat: isNr ? 'NR' : 'E-UTRA',
+                    source_kind: /Serving|PSCell/i.test(type) ? 'serving' : 'secondary_serving',
+                    pci: isNr ? integerOrNull(row[nrPciCol]) : ltePciFromRow(row),
+                    sc: isNr ? integerOrNull(row[nrPciCol]) : ltePciFromRow(row),
+                    freq: isNr ? finiteOrNull(row[nrChannelCol]) : lteChannelFromRow(row),
+                    earfcn: isNr ? null : lteChannelFromRow(row),
+                    nrarfcn: isNr ? finiteOrNull(row[nrChannelCol]) : null,
+                    // Keep measurements with their own RAT identity.  A
+                    // compact EN-DC export may contain both LTE and NR
+                    // columns on a single row; copying one family's KPI to
+                    // the other produces a fictitious serving cell.
+                    rsrp: isNr
+                        ? (nrRsrpMetricCol ? finiteOrNull(row[nrRsrpMetricCol]) : null)
+                        : (lteRsrpMetricCol ? finiteOrNull(row[lteRsrpMetricCol]) : null),
+                    rsrq: isNr
+                        ? (nrRsrqMetricCol ? finiteOrNull(row[nrRsrqMetricCol]) : null)
+                        : (lteRsrqMetricCol ? finiteOrNull(row[lteRsrqMetricCol]) : null),
+                    sinr: isNr
+                        ? (nrSinrMetricCol ? finiteOrNull(row[nrSinrMetricCol]) : null)
+                        : (lteSinrMetricCol ? finiteOrNull(row[lteSinrMetricCol]) : null),
+                    // The vendor cell-name field is retained only as source
+                    // context. Serving-name resolution remains PCI + channel
+                    // + proximity against the loaded BDD.
+                    source_cell_name: cellNameCol ? row[cellNameCol] || null : null,
+                    band: isNr ? (nrBandCol ? row[nrBandCol] || null : null) : lteBandFromRow(row),
+                    band_mhz: bandMhzCol ? finiteOrNull(row[bandMhzCol]) : null,
+                    bandwidth: !isNr && lteBwCol ? row[lteBwCol] || null : null,
+                    beam_index: isNr && beamIndexCol ? integerOrNull(row[beamIndexCol]) : null,
+                    beam_type: isNr && beamTypeCol ? row[beamTypeCol] || null : null,
+                    system: systemCol ? row[systemCol] || null : null,
+                    measurement_title: measurementTitleCol ? row[measurementTitleCol] || null : null,
+                    __lat: finiteOrNull(row[latKey]),
+                    __lng: finiteOrNull(row[lngKey]),
+                    __rowIndex: rowIndex
+                };
+            };
+            const chooseNearestRadioCell = (candidates, lat, lng, sourceRowIndex) => {
+                if (!Array.isArray(candidates) || !candidates.length) return null;
+                let best = null;
+                let bestDistance = Infinity;
+                let bestSystemAffinity = -1;
+                let bestRowDelta = Infinity;
+                const lonScale = Math.max(0.1, Math.cos(lat * Math.PI / 180));
+                candidates.forEach(candidate => {
+                    const hasGps = Number.isFinite(candidate.__lat) && Number.isFinite(candidate.__lng);
+                    const dLat = hasGps ? candidate.__lat - lat : Infinity;
+                    const dLng = hasGps ? (candidate.__lng - lng) * lonScale : Infinity;
+                    const distance = hasGps ? (dLat * dLat + dLng * dLng) : Infinity;
+                    const rowDelta = Math.abs(Number(candidate.__rowIndex) - Number(sourceRowIndex));
+                    const system = String(candidate.system || '').trim().toUpperCase();
+                    const systemAffinity = !system
+                        ? 1
+                        : candidate.rat === 'NR'
+                            ? (/(?:^|\b)(?:NR|5G)(?:\b|$)/.test(system) ? 2 : 0)
+                            : (/(?:^|\b)(?:LTE|E-UTRA|4G)(?:\b|$)/.test(system) ? 2 : 0);
+                    if (
+                        distance < bestDistance ||
+                        (distance === bestDistance && systemAffinity > bestSystemAffinity) ||
+                        (distance === bestDistance && systemAffinity === bestSystemAffinity && rowDelta < bestRowDelta)
+                    ) {
+                        best = candidate;
+                        bestDistance = distance;
+                        bestSystemAffinity = systemAffinity;
+                        bestRowDelta = rowDelta;
+                    }
+                });
+                return best || candidates[0];
+            };
+            const publicRadioCell = candidate => {
+                if (!candidate) return null;
+                const { __lat, __lng, __rowIndex, ...cell } = candidate;
+                return cell;
+            };
+
+            const contexts = new Map();
+            const snapshotRows = [];
+            const snapshotsByTimeAndPosition = new Map();
+            let duplicateRadioRowsRemoved = 0;
+            let duplicateMosRowsRemoved = 0;
+            for (let i = 0; i < json.length; i++) {
+                const row = json[i];
+                if (!row) continue;
+                const bucketKey = timeBucketKey(row[timeKey]);
+                const rowLat = finiteOrNull(row[latKey]);
+                const rowLng = finiteOrNull(row[lngKey]);
+                const mosRaw = row[mosCol];
+                const hasMos = finiteOrNull(mosRaw) !== null;
+                const radioMetricScore = [
+                    nrRsrpMetricCol, nrRsrqMetricCol, nrSinrMetricCol,
+                    lteRsrpMetricCol, lteRsrqMetricCol, lteSinrMetricCol
+                ].reduce((score, column) => score + (column && finiteOrNull(row[column]) !== null ? 1 : 0), 0);
+                if (rowLat !== null && rowLng !== null && (hasMos || radioMetricScore > 0)) {
+                    // One visual point per timestamp/position.  The previous
+                    // implementation retained only rows carrying MOS, which
+                    // discarded valid 4G/5G RF samples and produced gaps.
+                    const snapshotKey = [bucketKey, rowLat, rowLng].join('|');
+                    const candidateScore = radioMetricScore + (hasMos ? 2 : 0) +
+                        (/^(NR|LTE)$/i.test(String(row[systemCol] || '').trim()) ? 0.25 : 0);
+                    let snapshot = snapshotsByTimeAndPosition.get(snapshotKey);
+                    if (!snapshot) {
+                        snapshot = {
+                            row,
+                            rowIndex: i + 2,
+                            bucketKey,
+                            lat: rowLat,
+                            lng: rowLng,
+                            sourceScore: candidateScore,
+                            mosRaw: hasMos ? mosRaw : null
+                        };
+                        snapshotsByTimeAndPosition.set(snapshotKey, snapshot);
+                        snapshotRows.push(snapshot);
+                    } else {
+                        if (candidateScore > snapshot.sourceScore) {
+                            snapshot.row = row;
+                            snapshot.rowIndex = i + 2;
+                            snapshot.sourceScore = candidateScore;
+                        }
+                        if (hasMos && snapshot.mosRaw === null) snapshot.mosRaw = mosRaw;
+                        else if (hasMos) duplicateMosRowsRemoved += 1;
+                    }
+                }
+
+                const type = String(row[cellTypeCol] || '').trim();
+                let context = contexts.get(bucketKey);
+                if (!context) {
+                    context = { lteServing: [], nrServing: [], secondary: [], lteSinr: [], identities: new Set() };
+                    contexts.set(bucketKey, context);
+                }
+                if (isCompactEndcMosSchema) {
+                    // LTE and NR identities are both embedded in each vendor
+                    // row. A LTE-only row can nevertheless retain stale NR
+                    // ARFCN/PCI/RSRP values from the preceding EN-DC sample.
+                    // Such a row is not proof that NR is currently serving:
+                    // require either an explicit NR system row or a NR SINR
+                    // measurement on a system-neutral aggregate row.
+                    const addRadio = (radioType, target) => {
+                        const system = String(systemCol ? row[systemCol] || '' : '').trim();
+                        if (/^NR\b/i.test(radioType)) {
+                            const explicitNrSystem = /(?:^|\b)(?:NR|5G)(?:\b|$)/i.test(system);
+                            const neutralNrMeasurement = !system && nrSinrMetricCol &&
+                                finiteOrNull(row[nrSinrMetricCol]) !== null;
+                            if (!explicitNrSystem && !neutralNrMeasurement) return;
+                        }
+                        const cell = toRadioCell(row, radioType, i + 2);
+                        const hasIdentity = Number.isFinite(cell.pci) &&
+                            Number.isFinite(radioType === 'LTE Serving' ? cell.earfcn : cell.nrarfcn);
+                        if (!hasIdentity) return;
+                        const identity = radioIdentity(radioType, row);
+                        if (context.identities.has(identity)) {
+                            duplicateRadioRowsRemoved += 1;
+                            return;
+                        }
+                        context.identities.add(identity);
+                        context[target].push(cell);
+                    };
+                    addRadio('LTE Serving', 'lteServing');
+                    addRadio('NR SCG PSCell', 'nrServing');
+                    continue;
+                }
+                if (!type) {
+                    // Nemo sometimes writes SINR on a separate row with the
+                    // same timestamp and Ch/PCI, but no Cell type. It may
+                    // complete a measured PCell; it cannot create one.
+                    const system = String(systemCol ? row[systemCol] || '' : '').trim();
+                    if (!isCompactEndcMosSchema && !/(?:^|\b)(?:NR|5G)(?:\b|$)/i.test(system) && lteSinrMetricCol &&
+                        finiteOrNull(row[lteSinrMetricCol]) !== null) {
+                        const sinrCell = toRadioCell(row, 'LTE Serving', i + 2);
+                        if (Number.isFinite(sinrCell.pci) && Number.isFinite(sinrCell.earfcn))
+                            context.lteSinr.push(sinrCell);
+                    }
+                    continue;
+                }
+                const identity = radioIdentity(type, row);
+                if (context.identities.has(identity)) {
+                    duplicateRadioRowsRemoved += 1;
+                    continue;
+                }
+                context.identities.add(identity);
+                const radioCell = toRadioCell(row, type, i + 2);
+                const system = String(systemCol ? row[systemCol] || '' : '').trim();
+                if (/^LTE Serving$/i.test(type) ||
+                    (/^Serving$/i.test(type) && !/(?:^|\b)(?:NR|5G)(?:\b|$)/i.test(system) &&
+                        Number.isFinite(radioCell.pci) && Number.isFinite(radioCell.earfcn))) {
+                    radioCell.rat = 'E-UTRA';
+                    radioCell.source_kind = 'serving';
+                    context.lteServing.push(radioCell);
+                }
+                else if (/^NR SCG PSCell$/i.test(type)) context.nrServing.push(radioCell);
+                else if (/^(LTE SCell|NR SCG SCell|SCell)\b/i.test(type)) context.secondary.push(radioCell);
+            }
+
+            if (!isCompactEndcMosSchema) {
+                contexts.forEach(context => {
+                    const merged = new Map();
+                    context.lteServing.forEach(cell => {
+                        const key = `${cell.pci}|${cell.earfcn}|${cell.__lat}|${cell.__lng}`;
+                        const existing = merged.get(key);
+                        if (!existing) { merged.set(key, cell); return; }
+                        for (const metric of ['rsrp', 'rsrq', 'sinr']) {
+                            if (existing[metric] === null && cell[metric] !== null) existing[metric] = cell[metric];
+                        }
+                        if (!existing.source_cell_name && cell.source_cell_name)
+                            existing.source_cell_name = cell.source_cell_name;
+                    });
+                    context.lteSinr.forEach(cell => {
+                        const match = Array.from(merged.values()).find(serving =>
+                            serving.pci === cell.pci && serving.earfcn === cell.earfcn);
+                        if (match && match.sinr === null) match.sinr = cell.sinr;
+                    });
+                    context.lteServing = Array.from(merged.values());
+                });
+            }
+
+            const mosPoints = [];
+            const audit = {
+                sourceRows: json.length,
+                snapshotRows: snapshotRows.length,
+                mosRows: snapshotRows.filter(source => finiteOrNull(source.mosRaw) !== null).length,
+                validMosPoints: 0,
+                validRadioPoints: 0,
+                invalidMos: 0,
+                invalidCoordinates: 0,
+                exactLteServingMatches: 0,
+                exactNrServingMatches: 0,
+                duplicateRadioRowsRemoved,
+                duplicateMosRowsRemoved,
+                classes: { Bon: 0, Moyen: 0, Mauvaise: 0 }
+            };
+
+            for (let i = 0; i < snapshotRows.length; i++) {
+                const source = snapshotRows[i];
+                const row = source.row;
+                const rawMos = finiteOrNull(source.mosRaw);
+                const mos = rawMos !== null && rawMos >= 0 && rawMos <= 5 ? rawMos : null;
+                if (rawMos !== null && mos === null) audit.invalidMos += 1;
+                const lat = source.lat;
+                const lng = source.lng;
+                if (lat === null || lng === null || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+                    audit.invalidCoordinates += 1;
+                    continue;
+                }
+
+                const context = contexts.get(source.bucketKey) || { lteServing: [], nrServing: [], secondary: [] };
+                const lteServing = publicRadioCell(chooseNearestRadioCell(context.lteServing, lat, lng, source.rowIndex));
+                const nrServing = publicRadioCell(chooseNearestRadioCell(context.nrServing, lat, lng, source.rowIndex));
+                const nrRsrp = nrServing?.rsrp ?? (nrRsrpMetricCol ? finiteOrNull(row[nrRsrpMetricCol]) : null);
+                const nrRsrq = nrServing?.rsrq ?? (nrRsrqMetricCol ? finiteOrNull(row[nrRsrqMetricCol]) : null);
+                const nrSinr = nrServing?.sinr ?? (nrSinrMetricCol ? finiteOrNull(row[nrSinrMetricCol]) : null);
+                const lteRsrp = lteServing?.rsrp ?? (lteRsrpMetricCol ? finiteOrNull(row[lteRsrpMetricCol]) : null);
+                const lteRsrq = lteServing?.rsrq ?? (lteRsrqMetricCol ? finiteOrNull(row[lteRsrqMetricCol]) : null);
+                const lteSinr = lteServing?.sinr ?? (lteSinrMetricCol ? finiteOrNull(row[lteSinrMetricCol]) : null);
+                const hasNrRadio = [nrRsrp, nrRsrq, nrSinr].some(Number.isFinite);
+                const hasLteRadio = [lteRsrp, lteRsrq, lteSinr].some(Number.isFinite);
+                if (mos === null && !hasNrRadio && !hasLteRadio) continue;
+
+                // The generic `System`, `Cell name` and `1. best …` columns
+                // are not a serving identity.  Only an explicit PCI +
+                // RAT-specific channel creates a serving snapshot.  This is
+                // essential for compact Benchmark workbooks: an LTE row can
+                // retain a stale NR label and NR SINR while no NR PSCell is
+                // actually reported at that timestamp.
+                const hasNrServingIdentity = Boolean(
+                    nrServing && Number.isFinite(nrServing.pci) && Number.isFinite(nrServing.nrarfcn)
+                );
+                const hasLteServingIdentity = Boolean(
+                    lteServing && Number.isFinite(lteServing.pci) && Number.isFinite(lteServing.earfcn)
+                );
+                const primaryServing = hasNrServingIdentity
+                    ? nrServing
+                    : (hasLteServingIdentity ? lteServing : null);
+                const primaryRat = hasNrServingIdentity
+                    ? 'NR'
+                    : (hasLteServingIdentity ? 'LTE' : null);
+
+                // Never fall back from a valid NR PSCell to its LTE anchor:
+                // coverage/SINR colouring and Point Details must represent
+                // the user-serving RAT.  Conversely, NR KPI columns without
+                // a valid NR identity are ignored instead of fabricating a
+                // 5G serving cell for an LTE measurement.
+                const servingRsrp = primaryRat === 'NR'
+                    ? nrRsrp
+                    : (primaryRat === 'LTE' ? lteRsrp : null);
+                const servingRsrq = primaryRat === 'NR'
+                    ? nrRsrq
+                    : (primaryRat === 'LTE' ? lteRsrq : null);
+                const servingSinr = primaryRat === 'NR'
+                    ? nrSinr
+                    : (primaryRat === 'LTE' ? lteSinr : null);
+                const secondaryByType = new Map();
+                (Array.isArray(context.secondary) ? context.secondary : []).forEach(candidate => {
+                    const type = String(candidate.type || 'secondary');
+                    if (!secondaryByType.has(type)) secondaryByType.set(type, []);
+                    secondaryByType.get(type).push(candidate);
+                });
+                const secondaryCells = Array.from(secondaryByType.values())
+                    .map(candidates => publicRadioCell(chooseNearestRadioCell(candidates, lat, lng, source.rowIndex)))
+                    .filter(Boolean);
+                const mosClass = mos === null ? null : (mos >= 3 ? 'Bon' : (mos >= 2.2 ? 'Moyen' : 'Mauvaise'));
+                if (mosClass) {
+                    audit.classes[mosClass] += 1;
+                    audit.validMosPoints += 1;
+                }
+                if (hasNrRadio || hasLteRadio) audit.validRadioPoints += 1;
+                if (lteServing) audit.exactLteServingMatches += 1;
+                if (nrServing) audit.exactNrServingMatches += 1;
+
+                const point = {};
+                customMetrics.forEach(metric => { point[metric] = row[metric]; });
+                Object.assign(point, {
+                    id: mosPoints.length,
+                    lat,
+                    lng,
+                    time: normalizeTimeValue(row[timeKey]),
+                    __sourceTime: row[timeKey],
+                    __sourceRow: source.rowIndex,
+                    type: 'MEASUREMENT',
+                    tech: primaryRat === 'NR'
+                        ? (hasLteServingIdentity ? '4G/5G' : '5G (NR)')
+                        : (primaryRat === 'LTE' ? '4G (LTE)' : 'Unknown'),
+                    level: servingRsrp,
+                    rsrp: servingRsrp,
+                    rsrq: servingRsrq,
+                    sinr: servingSinr,
+                    ecno: servingRsrq,
+                    sc: primaryServing ? primaryServing.pci : null,
+                    pci: primaryServing ? primaryServing.pci : null,
+                    freq: primaryServing ? primaryServing.freq : null,
+                    earfcn: primaryRat === 'LTE' && primaryServing ? primaryServing.earfcn : null,
+                    nrarfcn: primaryRat === 'NR' && primaryServing ? primaryServing.nrarfcn : null,
+                    band: primaryServing ? primaryServing.band : null,
+                    ...(mos !== null ? {
+                        mos,
+                        'MOS DL': mos,
+                        'Classe MOS': mosClass
+                    } : {}),
+                    'Serving RSRP': servingRsrp,
+                    'Serving RSRQ': servingRsrq,
+                    'Serving SINR': servingSinr,
+                    '5G SS-RSRP': nrRsrp,
+                    '5G SS-RSRQ': nrRsrq,
+                    '5G SS-SINR': nrSinr,
+                    '4G RSRP': lteRsrp,
+                    '4G RSRQ': lteRsrq,
+                    '4G SINR': lteSinr,
+                    'Contexte Serving': primaryRat === 'NR'
+                        ? (hasLteServingIdentity ? 'NR PSCell + LTE anchor exact timestamp' : 'NR PSCell exact timestamp')
+                        : (primaryRat === 'LTE' ? 'LTE PCell exact timestamp' : 'No serving radio measurement at this timestamp'),
+                    __mosServingUnavailable: !primaryServing,
+                    'LTE Serving PCI': lteServing ? lteServing.pci : null,
+                    'LTE Serving EARFCN': lteServing ? lteServing.earfcn : null,
+                    'LTE Serving Band': lteServing ? lteServing.band : null,
+                    'LTE Serving BW': lteServing ? lteServing.bandwidth : null,
+                    'NR Serving PCI': nrServing ? nrServing.pci : null,
+                    'NR Serving ARFCN': nrServing ? nrServing.nrarfcn : null,
+                    'NR Serving Band': nrServing ? nrServing.band : null,
+                    'NR Serving Beam': nrServing ? nrServing.beam_index : null,
+                    'Secondary serving cells': secondaryCells.length
+                });
+                point.parsed = {
+                    // `serving` is always the user-facing serving RAT.  The
+                    // LTE PCell remains in `serving_lte` as an anchor when a
+                    // NR PSCell exists; it must not overwrite the NR cell.
+                    serving: primaryServing ? {
+                        ...primaryServing,
+                        cellName: null,
+                        rat: primaryRat === 'NR' ? 'NR' : 'E-UTRA'
+                    } : null,
+                    serving_lte: lteServing,
+                    serving_nr: nrServing,
+                    secondary_cells: secondaryCells,
+                    neighbors: []
+                };
+                point.properties = {
+                    ...row,
+                    ...(mos !== null ? {
+                        'MOS DL': mos,
+                        'Classe MOS': mosClass
+                    } : {}),
+                    'Serving RSRP': servingRsrp,
+                    'Serving RSRQ': servingRsrq,
+                    'Serving SINR': servingSinr,
+                    '5G SS-RSRP': nrRsrp,
+                    '5G SS-RSRQ': nrRsrq,
+                    '5G SS-SINR': nrSinr,
+                    '4G RSRP': lteRsrp,
+                    '4G RSRQ': lteRsrq,
+                    '4G SINR': lteSinr,
+                    'Contexte Serving': point['Contexte Serving'],
+                    'LTE Serving PCI': point['LTE Serving PCI'],
+                    'LTE Serving EARFCN': point['LTE Serving EARFCN'],
+                    'LTE Serving Band': point['LTE Serving Band'],
+                    'NR Serving PCI': point['NR Serving PCI'],
+                    'NR Serving ARFCN': point['NR Serving ARFCN'],
+                    'NR Serving Band': point['NR Serving Band']
+                };
+                mosPoints.push(point);
+            }
+
+            const enrichedMetrics = [
+                'MOS DL', 'Classe MOS', 'Contexte Serving',
+                'Serving RSRP', 'Serving RSRQ', 'Serving SINR',
+                '5G SS-RSRP', '5G SS-RSRQ', '5G SS-SINR',
+                '4G RSRP', '4G RSRQ', '4G SINR',
+                'LTE Serving PCI', 'LTE Serving EARFCN', 'LTE Serving Band', 'LTE Serving BW',
+                'NR Serving PCI', 'NR Serving ARFCN', 'NR Serving Band', 'NR Serving Beam',
+                'Secondary serving cells'
+            ];
+            if (onProgress) onProgress(95, `Imported ${mosPoints.length} valid MOS samples`);
+            return {
+                points: mosPoints,
+                tech: '4G/5G (MOS Excel)',
+                customMetrics: Array.from(new Set([mosCol, ...enrichedMetrics, ...customMetrics])),
+                signaling: [],
+                events: [],
+                callSessions: [],
+                debugInfo: {
+                    schema: 'mos-serving-timestamp-v1',
+                    mosColumn: mosCol,
+                    cellTypeColumn: cellTypeCol,
+                    audit
+                }
+            };
+        }
+
+        const points = [];
+        const len = json.length;
+
+        if (onProgress) onProgress(35, 'Initializing data map...');
+
+        // Processing in chunks to maintain responsiveness and show progress
+        const chunkSize = 500;
+        for (let i = 0; i < len; i += chunkSize) {
+            const end = Math.min(i + chunkSize, len);
+            for (let j = i; j < end; j++) {
+                const row = json[j];
+                if (!row) continue;
+                
+                const rawLat = latKey ? parseNumber(row[latKey]) : NaN;
+                const rawLng = lngKey ? parseNumber(row[lngKey]) : NaN;
+                const lat = !isNaN(rawLat) ? rawLat : null;
+                const lng = !isNaN(rawLng) ? rawLng : null;
+                const time = normalizeTimeValue(row[timeKey]);
+
+                if ((lat !== null && lng !== null) || time !== 'N/A') {
+                    const point = {
+                        lat: lat,
+                        lng: lng,
+                        time: time || 'N/A',
+                        // Preserve the original Excel serial/string for schema
+                        // adapters that need the calendar date and milliseconds.
+                        // The legacy `time` field remains unchanged for the map.
+                        __sourceTime: timeKey ? row[timeKey] : undefined,
+                        type: 'MEASUREMENT',
+                        level: -999,
+                        ecno: 0,
+                        sc: 0,
+                        rnc: null,
+                        cid: null,
+                        level: (levelCol && row[levelCol] !== undefined) ? parseNumber(row[levelCol]) : -999,
+                        ecno: (ecnoCol && row[ecnoCol] !== undefined) ? parseNumber(row[ecnoCol]) : 0,
+                    sc: (scCol && row[scCol] !== undefined) ? parseInt(parseNumber(row[scCol])) : 0,
+                    freq: (freqCol && row[freqCol] !== undefined) ? parseNumber(row[freqCol]) : undefined,
+                    band: (bandCol && row[bandCol] !== undefined) ? row[bandCol] : undefined,
+                    serving_cell_name: (servingCellNameCol && row[servingCellNameCol] !== undefined) ? String(row[servingCellNameCol]).trim() : undefined,
+                    cellId: (effectiveCellIdCol && row[effectiveCellIdCol] !== undefined) ? row[effectiveCellIdCol] : undefined,
+                    throughput_dl: (dlThputCol && row[dlThputCol] !== undefined) ? (parseNumber(row[dlThputCol]) * 1000.0) : undefined, // Convert -> Kbps
+                    throughput_ul: (ulThputCol && row[ulThputCol] !== undefined) ? (parseNumber(row[ulThputCol]) * 1000.0) : undefined  // Convert -> Kbps
+                };
+
+                // Fallback: If SC is 0 and CellID looks like PCI (and no explicit SC col), try to recover
+                if (point.sc === 0 && !scCol && point.cellId) {
+                    const maybePci = parseNumber(point.cellId);
+                    if (!isNaN(maybePci) && maybePci < 1000) {
+                        point.sc = parseInt(maybePci);
+                    }
+                }
+
+                // Parse RNC/CID from CellID if format is "RNC/CID" (e.g., "871/7588")
+                if (point.cellId) {
+                    const cidStr = String(point.cellId);
+                    if (cidStr.includes('/')) {
+                        const parts = cidStr.split('/');
+                        if (parts.length === 2) {
+                            const r = parseInt(parts[0]);
+                            const c = parseInt(parts[1]);
+                            if (!isNaN(r)) point.rnc = r;
+                            if (!isNaN(c)) point.cid = c;
+                        }
+                    } else {
+                        // Check if it's a Big Int (RNC+CID)
+                        const val = parseInt(point.cellId);
+                        if (!isNaN(val)) {
+                            if (val > 65535) {
+                                point.rnc = val >> 16;
+                                point.cid = val & 0xFFFF;
+                            } else {
+                                point.cid = val;
+                            }
+                        }
+                    }
+                }
+
+                // Add Custom Metrics (keep existing logic for other columns)
+                // Also scan for Neighbors (N1..N32) and Detected Set (D1..D12)
+                for (let k = 0; k < customMetrics.length; k++) {
+                    const m = customMetrics[k];
+                    const val = row[m];
+
+                    // Add all proprietary columns to point for popup details
+                    // Do not use parseFloat as a type test.  For example,
+                    // parseFloat("3G_DCST_Lmbarkiyine_17256_S5") returns 3,
+                    // corrupting the cell name shown in the voice anomalies.
+                    // A proprietary field is numeric only when its *entire*
+                    // value is a number (including the common decimal comma).
+                    const numericText = typeof val === 'string' ? val.trim().replace(',', '.') : '';
+                    const isWholeNumericValue = typeof val === 'number'
+                        || /^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i.test(numericText);
+                    point[m] = isWholeNumericValue
+                        ? (typeof val === 'number' ? val : parseFloat(numericText))
+                        : val;
+
+                    const normM = normalize(m);
+                    // Detect RAT prefix from ORIGINAL column name (e.g. '3G M1 SC', '2G M1 Rxlev', 'LTE N1 RSRP')
+                    let colRat = null;
+                    if (/^\s*(lte|4g)\s+/i.test(m)) colRat = 'E-UTRA';
+                    else if (/^\s*(3g|umts|wcdma)\s+/i.test(m)) colRat = 'UTRA';
+                    else if (/^\s*(2g|gsm|gprs)\s+/i.test(m)) colRat = 'GSM';
+
+                    const setNeighborField = (bucketKey, typeLabel, field, rawValue, ratOverride) => {
+                        if (!point._neighborsHelper) point._neighborsHelper = {};
+                        if (!point._neighborsHelper[bucketKey]) {
+                            point._neighborsHelper[bucketKey] = {
+                                type: typeLabel,
+                                source_kind: 'measured',
+                                rat: ratOverride || 'UTRA'
+                            };
+                        } else if (ratOverride) {
+                            point._neighborsHelper[bucketKey].rat = ratOverride;
+                        }
+                        point._neighborsHelper[bucketKey][field] = rawValue;
+                    };
+
+                    // ----------------------------------------------------------------
+                    // ACTIVE SET & NEIGHBORS (Enhanced parsing)
+                    // ----------------------------------------------------------------
+
+                    // Direct A/M/D/N parsing for Excel exports like "A2 SC", "M1 RSCP", "D1 EcNo"
+                    // Also handles RAT-prefixed columns like "3G M1 SC", "LTE N1 RSRP", "2G M1 RxLev"
+                    const normStripped = normM.replace(/^(lte|4g|3g|umts|wcdma|2g|gsm|gprs)/, '');
+                    const amdMatch = normStripped.match(/^([amnd])(\d+)(sc|psc|pci|identity|rscp|rsrp|ecno|rsrq|freq|uarfcn|earfcn|rxlev|rxqual)$/i);
+                    if (amdMatch) {
+                        const prefix = amdMatch[1].toLowerCase();
+                        const idx = parseInt(amdMatch[2], 10);
+                        const metric = amdMatch[3].toLowerCase();
+                        if (idx >= 1 && idx <= 32) {
+                            const numVal = parseNumber(val);
+                            const bucketKey = prefix === 'a' ? idx : (prefix === 'm' ? 100 + idx : (prefix === 'n' ? 300 + idx : 200 + idx));
+                            const typeLabel = `${prefix.toUpperCase()}${idx}`;
+                            const ratForNeighbor = colRat || (metric === 'rxlev' || metric === 'rxqual' ? 'GSM' : (metric === 'earfcn' ? 'E-UTRA' : 'UTRA'));
+
+                            if (metric === 'sc' || metric === 'psc' || metric === 'pci' || metric === 'identity') {
+                                const parsedId = Number.isFinite(numVal) ? parseInt(numVal, 10) : parseInt(String(val).trim(), 10);
+                                if (!isNaN(parsedId)) {
+                                    point[`${prefix}${idx}_sc`] = parsedId;
+                                    point[`${prefix}${idx}_psc`] = parsedId;
+                                    setNeighborField(bucketKey, typeLabel, 'sc', parsedId, ratForNeighbor);
+                                    setNeighborField(bucketKey, typeLabel, 'pci', parsedId, ratForNeighbor);
+                                    setNeighborField(bucketKey, typeLabel, 'psc', parsedId, ratForNeighbor);
+                                }
+                            } else if (metric === 'rscp' || metric === 'rsrp' || metric === 'rxlev') {
+                                if (Number.isFinite(numVal)) {
+                                    point[`${prefix}${idx}_rscp`] = numVal;
+                                    setNeighborField(bucketKey, typeLabel, 'rscp', numVal, ratForNeighbor);
+                                    if (metric === 'rxlev') setNeighborField(bucketKey, typeLabel, 'rxlev', numVal, ratForNeighbor);
+                                }
+                            } else if (metric === 'ecno' || metric === 'rsrq' || metric === 'rxqual') {
+                                if (Number.isFinite(numVal)) {
+                                    point[`${prefix}${idx}_ecno`] = numVal;
+                                    setNeighborField(bucketKey, typeLabel, 'ecno', numVal, ratForNeighbor);
+                                    if (metric === 'rxqual') setNeighborField(bucketKey, typeLabel, 'rxqual', numVal, ratForNeighbor);
+                                }
+                            } else if (metric === 'freq' || metric === 'uarfcn' || metric === 'earfcn') {
+                                if (Number.isFinite(numVal)) {
+                                    point[`${prefix}${idx}_freq`] = numVal;
+                                    point[`${prefix}${idx}_uarfcn`] = numVal;
+                                    setNeighborField(bucketKey, typeLabel, 'freq', numVal, ratForNeighbor);
+                                    setNeighborField(bucketKey, typeLabel, 'uarfcn', numVal, ratForNeighbor);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Regex helpers
+                    const extractIdx = (str, prefix) => {
+                        const matcha = str.match(new RegExp(`${prefix} (\\d +)`));
+                        return matcha ? parseInt(matcha[1]) : null;
+                    };
+
+                    // Neighbors N1..N32, A1..A8, M1..M8
+                    const isA = normM.includes('a') && /[a](\d+)/.test(normM);
+                    const isM = normM.includes('m') && /[m](\d+)/.test(normM);
+                    const isN = normM.includes('n') && /[n](\d+)/.test(normM);
+
+                    if ((isA || isM || isN) && (normM.includes('sc') || normM.includes('pci') || normM.includes('identity') || normM.includes('rscp') || normM.includes('rsrp') || normM.includes('ecno') || normM.includes('rsrq') || normM.includes('freq') || normM.includes('earfcn') || normM.includes('rxlev') || normM.includes('rxqual'))) {
+                        if (m === scCol) continue;
+
+                        const digitMatch = normM.match(/[amn](\d+)/);
+                        if (digitMatch) {
+                            const idx = parseInt(digitMatch[1]);
+                            const typeChr = digitMatch[0].charAt(0);
+                            const keyIdx = (typeChr === 'a') ? 1000 + idx : (typeChr === 'm' ? 2000 + idx : idx);
+                            const ratForNeighbor = colRat || (normM.includes('rxlev') || normM.includes('rxqual') ? 'GSM' : (normM.includes('earfcn') ? 'E-UTRA' : 'UTRA'));
+                            
+                            if (idx >= 1 && idx <= 32) {
+                                if (!point._neighborsHelper) point._neighborsHelper = {};
+                                if (!point._neighborsHelper[keyIdx]) point._neighborsHelper[keyIdx] = { 
+                                    type: (typeChr === 'a') ? 'active' : (typeChr === 'm' ? 'monitored' : 'neighbor'),
+                                    rat: ratForNeighbor
+                                };
+                                else if (ratForNeighbor) point._neighborsHelper[keyIdx].rat = ratForNeighbor;
+
+                                const numVal = parseNumber(val);
+
+                                if (normM.includes('sc') || normM.includes('pci') || normM.includes('identity')) point._neighborsHelper[keyIdx].pci = parseInt(numVal);
+                                if (normM.includes('rscp') || normM.includes('rsrp') || normM.includes('rxlev')) point._neighborsHelper[keyIdx].rscp = numVal;
+                                if (normM.includes('ecno') || normM.includes('rsrq') || normM.includes('rxqual')) point._neighborsHelper[keyIdx].ecno = numVal;
+                                if (normM.includes('freq') || normM.includes('earfcn')) point._neighborsHelper[keyIdx].freq = numVal;
+                            }
+                        }
+                    }
+
+                    // Detected Set D1..D8
+                    if (normM.includes('d') && !normM.includes('data') && !normM.includes('band') && (normM.includes('sc') || normM.includes('pci'))) {
+                        const digitMatch = normM.match(/d(\d+)/);
+                        if (digitMatch) {
+                            const idx = parseInt(digitMatch[1]);
+                            if (idx >= 1 && idx <= 32) {
+                                if (!point._neighborsHelper) point._neighborsHelper = {};
+                                const key = 100 + idx;
+                                if (!point._neighborsHelper[key]) point._neighborsHelper[key] = { type: 'detected' };
+
+                                const numVal = parseNumber(val);
+
+                                if (normM.includes('sc') || normM.includes('pci')) point._neighborsHelper[key].pci = parseInt(numVal);
+                                if (normM.includes('rscp') || normM.includes('rsrp')) point._neighborsHelper[key].rscp = numVal;
+                                if (normM.includes('ecno') || normM.includes('rsrq')) point._neighborsHelper[key].ecno = numVal;
+                            }
+                        }
+                    }
+                } // End Custom Metrics Loop
+
+                // Construct Neighbors Array from Helper
+                const neighbors = [];
+                if (point._neighborsHelper) {
+                    Object.keys(point._neighborsHelper).sort((a, b) => a - b).forEach(idx => {
+                        neighbors.push(point._neighborsHelper[idx]);
+                    });
+                    delete point._neighborsHelper; // Parsing cleanup
+                }
+                
+                // Construct specific serving matrices
+                let servingLte = null;
+                if (lteServingRsrpCol || lteServingPciCol || scCol) {
+                    servingLte = {
+                        rsrp: lteServingRsrpCol ? parseNumber(row[lteServingRsrpCol]) : null,
+                        rsrq: lteServingRsrqCol ? parseNumber(row[lteServingRsrqCol]) : null,
+                        sinr: lteServingSinrCol ? parseNumber(row[lteServingSinrCol]) : null,
+                        pci: lteServingPciCol ? parseInt(parseNumber(row[lteServingPciCol])) : (scCol ? parseInt(parseNumber(row[scCol])) : null),
+                        earfcn: lteServingEarfcnCol ? parseNumber(row[lteServingEarfcnCol]) : null
+                    };
+                }
+                let serving3g = null;
+                if (umtsServingRscpCol || umtsServingScCol || scCol) {
+                    serving3g = {
+                        rscp: umtsServingRscpCol ? parseNumber(row[umtsServingRscpCol]) : null,
+                        ecno: umtsServingEcnoCol ? parseNumber(row[umtsServingEcnoCol]) : null,
+                        sc: umtsServingScCol ? parseInt(parseNumber(row[umtsServingScCol])) : (scCol ? parseInt(parseNumber(row[scCol])) : null),
+                        freq: umtsServingFreqCol ? parseNumber(row[umtsServingFreqCol]) : null
+                    };
+                }
+                let serving2g = null;
+                if (gsmServingRxlevCol || gsmServingBsicCol) {
+                    serving2g = {
+                        rxlev: gsmServingRxlevCol ? parseNumber(row[gsmServingRxlevCol]) : null,
+                        rxqual: gsmServingRxqualCol ? parseNumber(row[gsmServingRxqualCol]) : null,
+                        arfcn: gsmServingArfcnCol ? parseNumber(row[gsmServingArfcnCol]) : null,
+                        bsic: gsmServingBsicCol ? parseNumber(row[gsmServingBsicCol]) : null
+                    };
+                }
+
+                // Add parsed object for safety if app expects it
+                point.parsed = {
+                    serving: {
+                        level: point.level,
+                        ecno: point.ecno,
+                        sc: point.sc,
+                        freq: point.freq,
+                        band: point.band,
+                        cellName: point.serving_cell_name || null,
+                        lac: point.lac || 0 // Default LAC
+                    },
+                    serving_lte: servingLte,
+                    serving_3g: serving3g,
+                    serving_2g: serving2g,
+                    neighbors: neighbors
+                };
+
+                points.push(point);
+            } // End if (lat/lng/time)
+        } // End j loop
+        
+        if (onProgress) {
+            const pct = 35 + ((i / len) * 55);
+            onProgress(pct, `Processing data (${i}/${len})...`);
+        }
+        // Yield to UI
+        await new Promise(resolve => setTimeout(resolve, 0));
+    } // End i loop
+
+        // Add Computed Metrics to List
+        if (dlThputCol) customMetrics.push('throughput_dl');
+        if (ulThputCol) customMetrics.push('throughput_ul');
+
+        // Detect Technology based on measurements
+        let detectedTech = '4G (Excel)';
+        if (points.length > 0) {
+            const freqs = points.slice(0, 100).map(p => p.freq).filter(f => !isNaN(f) && f > 0);
+            if (freqs.length > 0) {
+                const is3G = freqs.some(f => (f >= 10500 && f <= 10900) || (f >= 2900 && f <= 3100) || (f >= 4300 && f <= 4500));
+                if (is3G) detectedTech = '3G (Excel)';
+                else if (freqs.some(f => f < 1000)) detectedTech = '2G (Excel)';
+                else if (freqs.some(f => f > 120000)) detectedTech = '5G (NR)';
+                else detectedTech = '4G (Excel)';
+            } else if (levelCol) {
+                const lowCol = normalize(levelCol);
+                if (lowCol.includes('rsrp')) detectedTech = '4G (Excel)';
+                else if (lowCol.includes('rscp')) detectedTech = '3G (Excel)';
+            }
+        }
+
+        // Post-process 4G points: backfill serving_lte RF values and promote neighbor RATs
+        if (detectedTech.startsWith('4G') || detectedTech.startsWith('5G')) {
+            points.forEach(pt => {
+                if (pt.parsed && pt.parsed.serving_lte) {
+                    const sl = pt.parsed.serving_lte;
+                    if (sl.rsrp === null && Number.isFinite(pt.level) && pt.level > -200) sl.rsrp = pt.level;
+                    if (sl.rsrq === null && Number.isFinite(pt.ecno) && pt.ecno !== 0) sl.rsrq = pt.ecno;
+                    if (sl.earfcn === null && Number.isFinite(pt.freq) && pt.freq > 0) sl.earfcn = pt.freq;
+                }
+                if (pt.parsed && Array.isArray(pt.parsed.neighbors)) {
+                    pt.parsed.neighbors.forEach(n => {
+                        if (n.rat === 'UTRA') n.rat = 'E-UTRA';
+                    });
+                }
+            });
+        }
+
+        // Dedicated UMTS voice Excel path.  These exports repeat all Active,
+        // Monitored and Detected cells for a single timestamp.  The generic
+        // event synthesizer below is intentionally row-oriented, so using it
+        // for this schema would duplicate call events and turn neighbours into
+        // pseudo-timeline samples.
+        let savedVoiceProfile = null;
+        try {
+            if (typeof localStorage !== 'undefined') {
+                const rawProfile = localStorage.getItem('optim.voiceIncidentProfile.v2');
+                const parsedProfile = rawProfile ? JSON.parse(rawProfile) : null;
+                if (parsedProfile && typeof parsedProfile === 'object') savedVoiceProfile = parsedProfile;
+            }
+        } catch (_voiceProfileError) {
+            savedVoiceProfile = null;
+        }
+        const voiceAnalysis = (typeof VoiceIncidentAnalyzer !== 'undefined' && VoiceIncidentAnalyzer && typeof VoiceIncidentAnalyzer.analyze === 'function')
+            ? VoiceIncidentAnalyzer.analyze(points, { profile: savedVoiceProfile || {} })
+            : null;
+        if (voiceAnalysis) {
+            if (voiceAnalysis.validationReport?.consoleReport) console.info('[UMTS RCA validation]\n' + voiceAnalysis.validationReport.consoleReport);
+            return {
+                points: points,
+                tech: '3G (Voice Excel)',
+                customMetrics: customMetrics,
+                signaling: [],
+                events: voiceAnalysis.events,
+                callSessions: voiceAnalysis.callSessions,
+                voiceAnalysis: voiceAnalysis,
+                debugInfo: {
+                    scCol: scCol,
+                    cellIdCol: cellIdCol,
+                    rncCol: null,
+                    levelCol: levelCol,
+                    voiceSchema: voiceAnalysis.schema,
+                    voiceAnalyzerVersion: voiceAnalysis.version
+                }
+            };
+        }
+
+        // Synthesize Events and CallSessions from specialized Excel columns
+        const events = [];
+        const callSessions = [];
+        let callSessionId = 1;
+        let activeCall = null;
+        
+        const evtTypeKey = keys.find(k => /event type/i.test(k));
+        const dropCallKey = keys.find(k => /drop call/i.test(k));
+        const callFailKey = keys.find(k => /call failure/i.test(k));
+        const rrcCauseKey = keys.find(k => /event rrc cause/i.test(k) || /network cause/i.test(k));
+        const callSetupTimeKey = keys.find(k => /call setup time/i.test(k));
+        const callDurationKey = keys.find(k => /call duration/i.test(k));
+        
+        points.forEach(p => {
+            let isEvent = false;
+            let eventName = 'Unknown Event';
+            let eventDetails = '';
+            
+            if (evtTypeKey && p[evtTypeKey]) {
+                isEvent = true;
+                eventName = String(p[evtTypeKey]).trim();
+            } else if (dropCallKey && p[dropCallKey] == 1) { // == 1 usually marks 'True' in binary columns
+                isEvent = true;
+                eventName = 'DROP_CALL';
+            } else if (callFailKey && p[callFailKey] == 1) {
+                isEvent = true;
+                eventName = 'CALL_SETUP_FAILURE';
+            }
+            
+            if (isEvent) {
+                if (rrcCauseKey && p[rrcCauseKey]) {
+                    eventDetails = 'Cause: ' + p[rrcCauseKey];
+                }
+                
+                const evt = {
+                    ...p, 
+                    type: 'EVENT',
+                    event: eventName,
+                    message: eventDetails || eventName,
+                    properties: { ...p.properties, 'Event': eventName }
+                };
+                if (eventDetails) evt.properties['Details'] = eventDetails;
+                if (callSetupTimeKey && p[callSetupTimeKey]) evt.properties['Call Setup Time (s)'] = p[callSetupTimeKey];
+                if (callDurationKey && p[callDurationKey]) evt.properties['Call Duration (s)'] = p[callDurationKey];
+                
+                if (activeCall) {
+                    evt.sessionId = activeCall.id;
+                    evt.properties['Session ID'] = activeCall.id;
+                } else if (eventName === 'DROP_CALL') {
+                    // Orphaned drop mapping for strict UI filtering
+                    evt.sessionId = `orphaned_drop_${Date.now()}`; 
+                    evt.properties['Session ID'] = evt.sessionId;
+                }
+
+                events.push(evt);
+                
+                const upperName = eventName.toUpperCase();
+                
+                // Active Call Tracker Logic
+                const isAttempt = upperName.includes('ATTEMPT') || upperName.includes('SETUP') || upperName.includes('CALL ATTEMPT');
+                
+                if (isAttempt) {
+                    // Start a new call
+                    if (activeCall) callSessions.push(activeCall); // Push previous if unclosed
+                    activeCall = {
+                        id: `xlscall_${callSessionId++}`,
+                        kind: 'UMTS_CALL',
+                        callTransactionId: p['Event id'] || p['Call ID'] || p['CallId'] || '-',
+                        type: 'unknown',
+                        technology: detectedTech,
+                        startTs: evt.time || null,
+                        endTs: null,
+                        startGps: { lat: evt.lat, lng: evt.lng },
+                        endGps: null,
+                        startCell: { sc: evt.sc, cellId: evt.cellId },
+                        endCell: null,
+                        events: [ evt ],
+                        durationSec: null,
+                        cause: '',
+                        messages: [],
+                        drop: false,
+                        setupFailure: false,
+                        outcome: 'INCOMPLETE',
+                        endType: 'UNKNOWN'
+                    };
+                } else if (activeCall) {
+                    // Connect event
+                    const isConnect = upperName.includes('CONNECT') || upperName.includes('CALL CONNECTED');
+                    if (isConnect) {
+                        activeCall.events.push(evt);
+                        activeCall.properties = activeCall.properties || {};
+                        if (callSetupTimeKey && p[callSetupTimeKey]) {
+                            activeCall.properties['Setup Time'] = p[callSetupTimeKey] + ' s';
+                        }
+                    }
+                    // End events
+                    const isDrop = upperName.includes('DROP') || upperName.includes('DROP_CALL');
+                    const isFail = upperName.includes('FAIL') || upperName.includes('BLOCK') || upperName.includes('CALL FAILURE');
+                    const isNormalEnd = upperName.includes('SESSION') || upperName.includes('END') || upperName.includes('DISCONNECT') || upperName.includes('CALL DISCONNECTED');
+                    
+                    if (isDrop) {
+                        activeCall.type = 'drop';
+                        activeCall.drop = true;
+                        activeCall.outcome = 'DROP_CALL';
+                        activeCall.endType = 'DROP';
+                        activeCall.endTs = evt.time;
+                        activeCall.endGps = { lat: evt.lat, lng: evt.lng };
+                        activeCall.endCell = { sc: evt.sc, cellId: evt.cellId };
+                        activeCall.cause = (rrcCauseKey && p[rrcCauseKey]) ? String(p[rrcCauseKey]) : eventName;
+                        if (callDurationKey && p[callDurationKey]) activeCall.durationSec = parseFloat(p[callDurationKey]);
+                        
+                        activeCall.finalRscp = evt.rscp !== undefined ? evt.rscp : evt.rsrp;
+                        activeCall.finalEcno = evt.ecno !== undefined ? evt.ecno : evt.rsrq;
+                        activeCall.events.push(evt);
+                        
+                        callSessions.push(activeCall);
+                        activeCall = null;
+                    } else if (isFail) {
+                        activeCall.type = 'setup_fail';
+                        activeCall.drop = false;
+                        activeCall.setupFailure = true;
+                        activeCall.outcome = 'CALL_SETUP_FAILURE';
+                        activeCall.endType = 'SETUP_FAILURE';
+                        activeCall.endTs = evt.time;
+                        activeCall.endGps = { lat: evt.lat, lng: evt.lng };
+                        activeCall.endCell = { sc: evt.sc, cellId: evt.cellId };
+                        activeCall.cause = (rrcCauseKey && p[rrcCauseKey]) ? String(p[rrcCauseKey]) : eventName;
+                        activeCall.events.push(evt);
+                        
+                        callSessions.push(activeCall);
+                        activeCall = null;
+                    } else if (isNormalEnd) { // Normal end
+                        activeCall.type = 'normal';
+                        activeCall.drop = false;
+                        activeCall.outcome = 'SUCCESS';
+                        activeCall.endType = 'NORMAL_RELEASE';
+                        activeCall.endTs = evt.time;
+                        activeCall.endGps = { lat: evt.lat, lng: evt.lng };
+                        activeCall.endCell = { sc: evt.sc, cellId: evt.cellId };
+                        if (callDurationKey && p[callDurationKey]) activeCall.durationSec = parseFloat(p[callDurationKey]);
+                        
+                        activeCall.events.push(evt);
+                        callSessions.push(activeCall);
+                        activeCall = null;
+                    } else {
+                        // Other events (HO, Restablishment, etc.)
+                        activeCall.events.push(evt);
+                    }
+                } else {
+                    // Event outside of known call (maybe orphaned Drop or session end)
+                    const isDrop = upperName.includes('DROP') || upperName.includes('DROP_CALL');
+                    const isBlock = upperName.includes('FAIL') || upperName.includes('BLOCK') || upperName.includes('CALL FAILURE');
+                    const isSessionEnd = upperName.includes('SESSION') || upperName.includes('END') || upperName.includes('DISCONNECT') || upperName.includes('CALL DISCONNECTED');
+                    
+                    if (isDrop || isBlock || isSessionEnd) {
+                        callSessions.push({
+                            id: `xlscall_${callSessionId++}`,
+                            kind: 'UMTS_CALL',
+                            callTransactionId: p['Event id'] || p['Call ID'] || p['CallId'] || '-',
+                            type: isDrop ? 'drop' : (isBlock ? 'setup_fail' : 'normal'),
+                            technology: detectedTech,
+                            startTs: evt.time || null, // Best guess for orphaned
+                            endTs: evt.time || null,
+                            startGps: { lat: evt.lat, lng: evt.lng },
+                            endGps: { lat: evt.lat, lng: evt.lng },
+                            startCell: { sc: evt.sc, cellId: evt.cellId },
+                            endCell: { sc: evt.sc, cellId: evt.cellId },
+                            events: [ evt ],
+                            durationSec: (callDurationKey && p[callDurationKey]) ? parseFloat(p[callDurationKey]) : null,
+                            finalRscp: evt.rscp !== undefined ? evt.rscp : evt.rsrp,
+                            finalEcno: evt.ecno !== undefined ? evt.ecno : evt.rsrq,
+                            cause: (rrcCauseKey && p[rrcCauseKey]) ? String(p[rrcCauseKey]) : eventName,
+                            messages: [],
+                            drop: isDrop,
+                            setupFailure: isBlock,
+                            radioMeasurementsTimeline: [] // Will still show as 0 measurements if row is sparse
+                        });
+                    }
+                }
+            }
+        });
+        
+        // Push unclosed
+        if (activeCall) callSessions.push(activeCall);
+
+        return {
+            points: points,
+            tech: detectedTech,
+            customMetrics: customMetrics.concat(['rrc_rel_cause', 'cs_rel_cause', 'iucs_status']),
+            signaling: [], // No signaling in simple excel for now
+            events: events,
+            callSessions: callSessions,
+            debugInfo: {
+                scCol: scCol,
+                cellIdCol: cellIdCol,
+                rncCol: null, // extracted from cellId usually
+                levelCol: levelCol
+            }
+        };
+    }
+};
+
+const DualSignalingParser = {
+    parse(content) {
+        const text = String(content || '');
+        const lines = text.split(/\r?\n/);
+        if (!lines.length) return { points: [], signaling: [], tech: 'Dual Signaling TXT', customMetrics: [] };
+
+        const header = (lines[0] || '').split('\t').map((v) => String(v || '').trim());
+        const indexOfHeader = (...names) => {
+            const wanted = names.map((n) => String(n || '').trim().toLowerCase());
+            return header.findIndex((h) => wanted.includes(String(h || '').trim().toLowerCase()));
+        };
+
+        const idxEventId = indexOfHeader('Event ID');
+        const idxSystem = indexOfHeader('System');
+        const idxTime = indexOfHeader('Time');
+        const idxSubchannel = indexOfHeader('Subchannel');
+        const idxUl = indexOfHeader('UL Message');
+        const idxDl = indexOfHeader('DL Message');
+        const idxDecoded = indexOfHeader('Decoded_Message', 'Decoded Message');
+        const idxMsgType = indexOfHeader('Msg. type', 'Msg type');
+        const idxMessageName = indexOfHeader('Message name');
+
+        const getCol = (parts, idx) => (idx >= 0 && idx < parts.length) ? String(parts[idx] || '').trim() : '';
+        const toTod = (fullTs) => {
+            const m = String(fullTs || '').match(/(\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?)/);
+            return m ? m[1] : String(fullTs || '').trim();
+        };
+        const inferDirection = (ul, dl, decoded) => {
+            if (ul && !dl) return 'UL';
+            if (dl && !ul) return 'DL';
+            const txt = `${ul} ${dl} ${decoded}`.toUpperCase();
+            if (/\bUPLINK\b/.test(txt)) return 'UL';
+            if (/\bDOWNLINK\b/.test(txt)) return 'DL';
+            return 'N/A';
+        };
+        const inferCategory = (system, subchannel, message, decoded, msgType) => {
+            const txt = `${system} ${subchannel} ${message} ${decoded} ${msgType}`.toUpperCase();
+            if (
+                txt.includes('RRC_') ||
+                txt.includes('SYSTEM_INFORMATION') ||
+                txt.includes('ACTIVE_SET_UPDATE') ||
+                txt.includes('MEASUREMENT_CONTROL') ||
+                txt.includes('MEASUREMENT REPORT') ||
+                txt.includes('MEASUREMENT_REPORT') ||
+                txt.includes('PHYSICAL_CHANNEL_RECONFIGURATION') ||
+                txt.includes('RADIO_BEARER_RECONFIGURATION') ||
+                txt.includes('TRANSPORT_CHANNEL_RECONFIGURATION') ||
+                txt.includes('CELL_UPDATE') ||
+                txt.includes('URA_UPDATE') ||
+                txt.includes('UTRAN_MOBILITY_INFORMATION')
+            ) {
+                return 'RRC';
+            }
+            return 'L3';
+        };
+        const extractFirstInt = (text, patterns) => {
+            const src = String(text || '');
+            for (const re of patterns) {
+                const m = src.match(re);
+                if (m) {
+                    const n = Number(m[1]);
+                    if (Number.isFinite(n)) return n;
+                }
+            }
+            return null;
+        };
+        const isMessageHeaderLine = (line) => {
+            if (!line || line.indexOf('\t') === -1) return false;
+            const parts = line.split('\t');
+            const timeVal = getCol(parts, idxTime >= 0 ? idxTime : 2);
+            const decoded = getCol(parts, idxDecoded >= 0 ? idxDecoded : 6);
+            const ul = getCol(parts, idxUl >= 0 ? idxUl : 4);
+            const dl = getCol(parts, idxDl >= 0 ? idxDl : 5);
+            const system = getCol(parts, idxSystem >= 0 ? idxSystem : 1);
+            return /\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2}\.\d{3}/.test(timeVal)
+                && !!system
+                && !!(decoded || ul || dl);
+        };
+
+        const signaling = [];
+        let current = null;
+
+        const finalizeCurrent = () => {
+            if (!current) return;
+            const fullDecodedMessage = current.blockLines.join('\n').trim();
+            const message = current.decodedMessage || current.ulMessage || current.dlMessage || current.msgType || 'Unknown';
+            const category = inferCategory(current.system, current.subchannel, message, current.decodedMessage, current.msgType);
+            const parsedRncId = extractFirstInt(fullDecodedMessage, [
+                /rnc id\s*:\s*(\d+)/i,
+                /srnc-identity[\s\S]*?=\s*(\d+)/i,
+                /drnc-identity[\s\S]*?=\s*(\d+)/i
+            ]);
+            const parsedCellId = extractFirstInt(fullDecodedMessage, [
+                /cell id\s*:\s*(\d+)/i,
+                /cellidentity[\s\S]*?=\s*(\d+)/i
+            ]);
+            const parsedPsc = extractFirstInt(fullDecodedMessage, [
+                /primaryScramblingCode\s*:\s*(\d+)/i,
+                /primary scrambling code\s*:\s*(\d+)/i,
+                /psc\s*:\s*(\d+)/i
+            ]);
+            const parsedUarfcn = extractFirstInt(fullDecodedMessage, [
+                /uarfcn\s*:\s*(\d+)/i,
+                /downlink uarfcn\s*:\s*(\d+)/i
+            ]);
+            const parsedLac = extractFirstInt(fullDecodedMessage, [
+                /\blac\s*:\s*(\d+)/i
+            ]);
+            const parsedRac = extractFirstInt(fullDecodedMessage, [
+                /\brac\s*:\s*(\d+)/i
+            ]);
+            const parsedSrnti = extractFirstInt(fullDecodedMessage, [
+                /s-RNTI[\s\S]*?=\s*(\d+)/i,
+                /\bs-rnti\s*:\s*(\d+)/i
+            ]);
+            const parsedPrimaryCpich = extractFirstInt(fullDecodedMessage, [
+                /primary CPICH info[\s\S]*?primaryScramblingCode\s*:\s*(\d+)/i,
+                /primary cpich[\s\S]*?primaryScramblingCode\s*:\s*(\d+)/i
+            ]);
+            const parsedRrcState = (() => {
+                const m = fullDecodedMessage.match(/rrc-StateIndicator\s*:\s*([A-Za-z0-9-]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedReleaseCause = (() => {
+                const m = fullDecodedMessage.match(/releaseCause\s*:\s*([^\n\r]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedCsReleaseCause = (() => {
+                const patterns = [
+                    /\bcc[-\s]*cause\s*:\s*([^\n\r]+)/i,
+                    /\bcs[-\s]*cause\s*:\s*([^\n\r]+)/i,
+                    /\bcause value\s*:\s*([^\n\r]+)/i,
+                    /\bcause\s*:\s*([^\n\r]+)/i
+                ];
+                for (const pattern of patterns) {
+                    const m = fullDecodedMessage.match(pattern);
+                    if (!m) continue;
+                    const txt = String(m[1] || '').trim();
+                    if (!txt) continue;
+                    if (/^rrc/i.test(txt)) continue;
+                    return txt;
+                }
+                return null;
+            })();
+            const parsedRrcReason = (() => {
+                const patterns = [
+                    /releaseCause\s*:\s*([^\n\r]+)/i,
+                    /rejectCause\s*:\s*([^\n\r]+)/i,
+                    /failureCause\s*:\s*([^\n\r]+)/i,
+                    /rrc[^:\n\r]{0,40}cause\s*:\s*([^\n\r]+)/i,
+                    /cause\s*value\s*:\s*([^\n\r]+)/i
+                ];
+                for (const pattern of patterns) {
+                    const m = fullDecodedMessage.match(pattern);
+                    if (m && String(m[1] || '').trim()) return String(m[1]).trim();
+                }
+                return null;
+            })();
+            const parsedCellUpdateCause = (() => {
+                const m = fullDecodedMessage.match(/cellUpdateCause\s*:\s*([^\n\r]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedEstablishmentCause = (() => {
+                const m = fullDecodedMessage.match(/establishmentCause\s*:\s*([^\n\r]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedEventId = (() => {
+                const m = fullDecodedMessage.match(/eventID\s*:\s*([^\n\r]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedRachEcnoDb = (() => {
+                const m = fullDecodedMessage.match(/measuredResultsOnRACH[\s\S]*?cpich-Ec-N0\s*:\s*\d+\s+\(=\s*([-\d.]+)\s*dB\)/i);
+                if (!m) return null;
+                const n = Number(m[1]);
+                return Number.isFinite(n) ? n : null;
+            })();
+            const measuredCells = (() => {
+                const pscs = [...fullDecodedMessage.matchAll(/primaryScramblingCode\s*:\s*(\d+)/gi)].map((m) => Number(m[1])).filter(Number.isFinite);
+                const rscps = [...fullDecodedMessage.matchAll(/cpich-RSCP\s*:\s*\d+\s+\(=\s*([-\d.]+)\s*dBm\)/gi)].map((m) => Number(m[1])).filter(Number.isFinite);
+                const ecnos = [...fullDecodedMessage.matchAll(/cpich-Ec-N0\s*:\s*\d+\s+\(=\s*([-\d.]+)\s*dB\)/gi)].map((m) => Number(m[1])).filter(Number.isFinite);
+                const len = Math.min(pscs.length, Math.max(rscps.length, ecnos.length));
+                const out = [];
+                for (let i = 0; i < len; i += 1) {
+                    out.push({
+                        psc: pscs[i] ?? null,
+                        rscpDbm: Number.isFinite(rscps[i]) ? rscps[i] : null,
+                        ecnoDb: Number.isFinite(ecnos[i]) ? ecnos[i] : null
+                    });
+                }
+                return out;
+            })();
+            signaling.push({
+                time: current.time,
+                timestamp: current.timestamp,
+                type: category,
+                category,
+                direction: current.direction,
+                message,
+                event: message,
+                details: current.decodedMessage || message,
+                payload: fullDecodedMessage,
+                fullDecodedMessage,
+                eventId: current.eventId,
+                system: current.system,
+                subchannel: current.subchannel,
+                ulMessage: current.ulMessage,
+                dlMessage: current.dlMessage,
+                msgType: current.msgType,
+                messageSpec: current.messageName,
+                parsedRncId,
+                parsedCellId,
+                parsedPsc,
+                parsedUarfcn,
+                parsedLac,
+                parsedRac,
+                parsedSrnti,
+                parsedPrimaryCpich,
+                parsedRrcState,
+                parsedReleaseCause,
+                parsedCsReleaseCause,
+                rrc_rel_cause: parsedReleaseCause,
+                cs_rel_cause: parsedCsReleaseCause,
+                parsedRrcReason,
+                parsedCellUpdateCause,
+                parsedEstablishmentCause,
+                parsedEventId,
+                parsedRachEcnoDb,
+                measuredCells,
+                rawHeaderLine: current.rawHeaderLine,
+                properties: {
+                    Time: current.time,
+                    Timestamp: current.timestamp,
+                    Type: category,
+                    Direction: current.direction,
+                    Message: message,
+                    Event: message,
+                    System: current.system,
+                    Subchannel: current.subchannel,
+                    'UL Message': current.ulMessage,
+                    'DL Message': current.dlMessage,
+                    'Decoded Message': current.decodedMessage,
+                    'Message Spec': current.messageName,
+                    'Event ID': current.eventId,
+                    'Parsed RNC ID': parsedRncId,
+                    'Parsed Cell ID': parsedCellId,
+                    'Parsed PSC': parsedPsc,
+                    'Parsed UARFCN': parsedUarfcn,
+                    'Parsed LAC': parsedLac,
+                    'Parsed RAC': parsedRac,
+                    'Parsed S-RNTI': parsedSrnti,
+                    'Parsed Primary CPICH': parsedPrimaryCpich,
+                    'Parsed RRC State': parsedRrcState,
+                    'Parsed Release Cause': parsedReleaseCause,
+                    'Parsed CS Release Cause': parsedCsReleaseCause,
+                    'RRC Release Cause': parsedReleaseCause,
+                    'CS Release Cause': parsedCsReleaseCause,
+                    'Parsed RRC Reason': parsedRrcReason,
+                    'Parsed Cell Update Cause': parsedCellUpdateCause,
+                    'Parsed Establishment Cause': parsedEstablishmentCause,
+                    'Parsed Event ID': parsedEventId,
+                    'Parsed RACH EcNo (dB)': parsedRachEcnoDb,
+                    'Full Decoded Message': fullDecodedMessage
+                }
+            });
+            current = null;
+        };
+
+        for (let i = 1; i < lines.length; i += 1) {
+            const line = lines[i];
+            if (isMessageHeaderLine(line)) {
+                finalizeCurrent();
+                const parts = line.split('\t');
+                const timestamp = getCol(parts, idxTime >= 0 ? idxTime : 2);
+                const ulMessage = getCol(parts, idxUl >= 0 ? idxUl : 4);
+                const dlMessage = getCol(parts, idxDl >= 0 ? idxDl : 5);
+                const decodedMessage = getCol(parts, idxDecoded >= 0 ? idxDecoded : 6);
+                current = {
+                    eventId: getCol(parts, idxEventId >= 0 ? idxEventId : 0),
+                    system: getCol(parts, idxSystem >= 0 ? idxSystem : 1),
+                    timestamp,
+                    time: toTod(timestamp),
+                    subchannel: getCol(parts, idxSubchannel >= 0 ? idxSubchannel : 3),
+                    ulMessage,
+                    dlMessage,
+                    decodedMessage,
+                    msgType: getCol(parts, idxMsgType >= 0 ? idxMsgType : 7),
+                    messageName: getCol(parts, idxMessageName >= 0 ? idxMessageName : 8),
+                    direction: inferDirection(ulMessage, dlMessage, decodedMessage),
+                    rawHeaderLine: line,
+                    blockLines: []
+                };
+                continue;
+            }
+            if (current) current.blockLines.push(line);
+        }
+
+        finalizeCurrent();
+
+        return {
+            points: [],
+            signaling,
+            tech: 'Dual Signaling TXT',
+            customMetrics: [],
+            events: [],
+            callSessions: []
+        };
+    }
+};

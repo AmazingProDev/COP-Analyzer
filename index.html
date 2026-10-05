@@ -1,0 +1,1988 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>COP Analyzer</title>
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📡</text></svg>">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/2.2.1/chartjs-plugin-annotation.min.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script defer src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
+    <script defer src="https://unpkg.com/@turf/turf/turf.min.js"></script>
+<link rel="stylesheet" href="style.css?v=63">
+    <link rel="stylesheet" href="cesium_map.css?v=1">
+    <link rel="stylesheet" href="grid_styles.css?v=2">
+    <link rel="stylesheet" href="additional_styles.css?v=3">
+    <link rel="stylesheet" href="local_ai_styles.css?v=2">
+    <link rel="stylesheet" href="los_pollution_styles.css?v=1">
+    <link rel="stylesheet" href="benchmark_report.css?v=2">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* COP LITE: heavy modules removed from DOM flow */
+        #benchmarkPanel, #statisticsPanel { display: none !important; }
+        /* COP landing gate */
+        #copGate { position: fixed; inset: 0; z-index: 99999; display: flex; align-items: center; justify-content: center;
+            background: #3d0a0a url("landing-bg.jpg") center / cover no-repeat; transition: opacity .35s ease; }
+        #copGate::before { content: ""; position: absolute; inset: 0; background: linear-gradient(115deg, rgba(20,2,2,.82) 0%, rgba(20,2,2,.55) 45%, rgba(20,2,2,.25) 100%); }
+        .cop-card { position: relative; width: min(380px, 92vw); background: rgba(12,14,20,.78); backdrop-filter: blur(10px);
+            border: 1px solid rgba(248,113,113,.35); border-radius: 14px; padding: 28px 26px; box-shadow: 0 24px 70px rgba(0,0,0,.6); color: #e5e7eb; }
+        .cop-card h1 { margin: 0; font-size: 24px; letter-spacing: .06em; color: #f8fafc; }
+        .cop-card h1 span { color: #f87171; }
+        .cop-card p.sub { margin: 6px 0 18px; font-size: 12px; color: #94a3b8; }
+        .cop-field { margin-bottom: 12px; }
+        .cop-field label { display: block; font-size: 11px; color: #94a3b8; margin-bottom: 5px; text-transform: uppercase; letter-spacing: .05em; }
+        .cop-field input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid #475569; background: #111827; color: #f8fafc; font-size: 14px; }
+        .cop-field input:focus { outline: none; border-color: #f87171; }
+        #copLoginBtn { width: 100%; padding: 11px; border: 0; border-radius: 8px; background: linear-gradient(90deg,#b91c1c,#ef4444); color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; margin-top: 6px; }
+        #copLoginBtn:disabled { opacity: .6; cursor: wait; }
+        #copGateError { display: none; margin-top: 12px; font-size: 12px; color: #fca5a5; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.4); border-radius: 7px; padding: 8px 10px; }
+        /* Emergency Styles to force visibility */
+        #app {
+            display: flex !important;
+            flex-direction: column !important;
+            height: 100vh !important;
+        }
+
+        header {
+            display: flex !important;
+            min-height: 60px !important;
+            background: #2d2d2d !important;
+            z-index: 9999 !important;
+            /* border-bottom: 2px solid red !important; REMOVED DEBUG */
+        }
+
+        #logs-sidebar {
+            display: flex !important;
+            width: 250px !important;
+            z-index: 9998 !important;
+        }
+
+        main {
+            display: flex !important;
+        }
+
+        @keyframes signalingRowFlash {
+            0% { box-shadow: inset 3px 0 0 currentColor, 0 0 0 rgba(96,165,250,0); }
+            25% { box-shadow: inset 3px 0 0 currentColor, 0 0 0 2px rgba(96,165,250,0.95); }
+            100% { box-shadow: inset 3px 0 0 currentColor, 0 0 0 rgba(96,165,250,0); }
+        }
+
+        .signaling-row-flash {
+            animation: signalingRowFlash 1.1s ease-out;
+        }
+
+        /* TRP Sidebar Tech Badges */
+        .trp-tech-badge {
+            font-size: 9px;
+            padding: 1px 5px;
+            border-radius: 8px;
+            color: #fff;
+            font-weight: 700;
+            margin-left: 4px;
+            vertical-align: middle;
+            text-transform: none;
+            display: inline-block;
+            line-height: 1.2;
+        }
+        .trp-tech-badge-nr { background: #7c3aed; }
+        .trp-tech-badge-lte { background: #0ea5e9; }
+    </style>
+    <!-- MapLibre GL JS for LOS map -->
+    <link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet">
+    <script defer src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+    <link rel="stylesheet" href="los_styles.css">
+    <link rel="stylesheet" href="rf_styles.css?v=26">
+    <link rel="stylesheet" href="rf_manual_aoi.css?v=1">
+    <link rel="preload" as="image" href="landing-bg.jpg">
+    <style>.rf-results{max-height:240px}.rf-site-candidate{background:linear-gradient(90deg,#0d263b,#0a1729);border-color:#256a8f}.rf-site-candidate em{font-size:10px;font-style:normal;color:#7dd3fc;background:#11304a;border-radius:10px;padding:2px 5px}.rf-result-label{font-size:10px;font-weight:800;letter-spacing:.08em;color:#7dd3fc;text-transform:uppercase;margin:9px 0 4px}.rf-selection-summary{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#7dd3fc;margin:8px 0 3px}.rf-selection-summary button,.rf-layer-buttons button{border:1px solid #315477;border-radius:6px;background:#122840;color:#dbeafe;padding:4px 7px;cursor:pointer;font-size:11px}.rf-result-views{margin-top:8px}.rf-layer-buttons{display:flex;gap:6px;flex-wrap:wrap}.rf-layer-buttons button.active{background:#075985;border-color:#38bdf8;color:#f0f9ff}.rf-draggable-popup .leaflet-popup-content{margin:0}.rf-popup-drag-handle{padding:7px 12px;background:#071323;border-bottom:1px solid #214365;color:#7dd3fc;font-size:11px;font-weight:800;letter-spacing:.04em;cursor:move;user-select:none;touch-action:none}.rf-popup-body{padding:9px 12px 11px}.rf-popup-dragging{opacity:.96;cursor:move}</style>
+</head>
+
+<body>
+    <!-- COP landing gate (login required before accessing the app) -->
+    <div id="copGate" role="dialog" aria-label="Connexion COP Analyzer">
+        <div class="cop-card">
+            <h1>COP <span>ANALYZER</span></h1>
+            <p class="sub">Analyse Drive Test 4G / 5G — accès protégé</p>
+            <form id="copLoginForm" autocomplete="off">
+                <div class="cop-field">
+                    <label for="copUser">Utilisateur</label>
+                    <input id="copUser" type="text" autocomplete="username" placeholder="Nom d'utilisateur">
+                </div>
+                <div class="cop-field">
+                    <label for="copPass">Mot de passe</label>
+                    <input id="copPass" type="password" autocomplete="current-password" placeholder="Mot de passe">
+                </div>
+                <button id="copLoginBtn" type="submit">Se connecter</button>
+            </form>
+            <div id="copGateError"></div>
+        </div>
+    </div>
+    <script>
+    /* COP landing gate — inline so login works instantly, before deferred libs.
+     * Users are username -> SHA-256 hex of password (static deterrent, no backend).
+     * Change password: node -e "console.log(require('crypto').createHash('sha256').update('NEW').digest('hex'))" */
+    (function () {
+      "use strict";
+      var COP_USERS = {
+        admin: "95496fdc40e892961ffe7782ff9d9a7a0c2a5705cf5d17250bd930c992f45fe7", // cop2026
+      };
+      function $(id) { return document.getElementById(id); }
+      function sha256Hex(text) {
+        var digest = window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+        return digest.then(function (d) {
+          return Array.prototype.map.call(new Uint8Array(d), function (b) {
+            return ("0" + b.toString(16)).slice(-2);
+          }).join("");
+        });
+      }
+      function revealApp() {
+        var gate = $("copGate");
+        if (gate) {
+          gate.style.opacity = "0";
+          setTimeout(function () { gate.style.display = "none"; }, 350);
+        }
+        try { window.dispatchEvent(new Event("cop:authed")); } catch (e) {}
+        setTimeout(function () {
+          try {
+            if (window.map && typeof window.map.invalidateSize === "function") window.map.invalidateSize(true);
+            else if (window.mapRenderer && window.mapRenderer.map && typeof window.mapRenderer.map.invalidateSize === "function") window.mapRenderer.map.invalidateSize(true);
+          } catch (e) {}
+        }, 100);
+      }
+      function setError(msg) {
+        var el = $("copGateError");
+        if (el) { el.textContent = msg || ""; el.style.display = msg ? "block" : "none"; }
+      }
+      function tryLogin(event) {
+        if (event) event.preventDefault();
+        var userEl = $("copUser"), passEl = $("copPass"), btn = $("copLoginBtn");
+        var username = userEl ? String(userEl.value || "").trim() : "";
+        var password = passEl ? String(passEl.value || "") : "";
+        if (!username || !password) { setError("Nom d'utilisateur et mot de passe requis."); return; }
+        if (!window.crypto || !window.crypto.subtle) { setError("Navigateur incompatible : ouvrez l'app via http://localhost (python3 -m http.server)."); return; }
+        if (btn) { btn.disabled = true; btn.textContent = "Vérification…"; }
+        sha256Hex(password).then(function (hash) {
+          if (COP_USERS[username] && COP_USERS[username] === hash) { setError(""); revealApp(); }
+          else { setError("Identifiants incorrects."); if (passEl) { passEl.value = ""; passEl.focus(); } }
+          if (btn) { btn.disabled = false; btn.textContent = "Se connecter"; }
+        }, function () {
+          setError("Navigateur incompatible : ouvrez l'app via http://localhost (python3 -m http.server).");
+          if (btn) { btn.disabled = false; btn.textContent = "Se connecter"; }
+        });
+      }
+      var form = $("copLoginForm");
+      if (form) form.addEventListener("submit", tryLogin);
+      var userEl = $("copUser");
+      if (userEl) setTimeout(function () { try { userEl.focus(); } catch (e) {} }, 60);
+      (function pickBackground() {
+        var gate = $("copGate");
+        if (!gate) return;
+        var candidates = ["landing-bg.jpg", "landing-bg.png", "landing-bg.webp"];
+        var i = 0;
+        function next() {
+          if (i >= candidates.length) return;
+          var probe = new Image();
+          probe.onload = function () { gate.style.backgroundImage = 'url("' + candidates[i] + '")'; };
+          probe.onerror = function () { i += 1; next(); };
+          probe.src = candidates[i];
+        }
+        next();
+      })();
+      document.addEventListener("DOMContentLoaded", function () {
+        var logoutBtn = $("copLogoutBtn");
+        if (logoutBtn) {
+          logoutBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            window.location.reload();
+          });
+        }
+      });
+    })();
+    </script>
+    <div id="app">
+        <!-- Main Application Header -->
+        <header id="mainHeader" class="main-header">
+            <div class="logo">COP Analyzer</div>
+            <div class="header-map-actions">
+                <!-- Hidden Inputs (LITE: DT csv/excel/txt+kml + sites only) -->
+                <input type="file" id="fileInput" accept=".csv, .txt, .xlsx, .xls, .ods, .kml, .kmz"
+                    class="hidden-input" aria-label="Import Drive Test File (CSV/XLSX/ODS/TXT/KML/KMZ)">
+                <input type="file" id="siteInput" accept=".xlsx, .xls, .ods, .csv, .kml, .kmz" class="hidden-input"
+                    aria-label="Import Site Data (XLSX, CSV, KML or KMZ)">
+                <input type="file" id="workspaceInput" accept=".txt" class="hidden-input"
+                    aria-label="Open Workspace File">
+                <!-- LITE dummies: kept hidden so app.js null-guards never trip -->
+                <input type="file" id="trpImportInput" accept=".trp" class="hidden-input" style="display:none" aria-hidden="true" tabindex="-1">
+                <input type="file" id="shpInput" accept=".shp,.zip" class="hidden-input" style="display:none" aria-hidden="true" tabindex="-1">
+                <input type="file" id="benchmarkInput" class="hidden-input" style="display:none" aria-hidden="true" tabindex="-1">
+                <input type="file" id="benchmarkNemoInput" class="hidden-input" style="display:none" aria-hidden="true" tabindex="-1">
+                <input type="file" id="benchmarkOptimInput" class="hidden-input" style="display:none" aria-hidden="true" tabindex="-1">
+                <input type="file" id="benchmarkMycomInput" class="hidden-input" style="display:none" aria-hidden="true" tabindex="-1">
+                <input type="file" id="statisticsMycomInput" class="hidden-input" style="display:none" aria-hidden="true" tabindex="-1">
+
+                <!-- ===== Menu Bar ===== -->
+                <div class="menu-bar">
+                    <!-- FILE menu -->
+                    <div class="menu-dropdown" data-menu="file">
+                        <button class="menu-trigger" type="button">File</button>
+                        <div class="menu-panel">
+                            <!-- Import submenu -->
+                            <div class="menu-submenu-wrap">
+                                <button id="importBtn" class="menu-item has-submenu" type="button">📂 Import<span class="submenu-arrow">›</span></button>
+                                <div class="menu-submenu">
+                                    <button class="menu-item" data-import="other">📄 DT (.csv/.xlsx/.txt)</button>
+                                    <button class="menu-item" data-import="dt_kml">🗺️ KML / KMZ — Google Earth / DT</button>
+                                    <div class="menu-divider"></div>
+                                    <button class="menu-item" data-import="sites">📡 Sites</button>
+                                </div>
+                            </div>
+                            <button id="exportKmlBtn" class="menu-item" title="Export current view to KML">🌍 Export KML</button>
+                            <button id="workspaceBtn" class="menu-item" title="Save or open a workspace">🗂️ Workspace</button>
+                            <div class="menu-divider"></div>
+                            <button id="btnAddSector" class="menu-item" onclick="window.openAddSiteQuickModal()" title="Add Site Manually">📍 Add Site</button>
+                            <div class="menu-divider"></div>
+                            <button id="copLogoutBtn" class="menu-item" title="Se déconnecter">🔒 Logout</button>
+                        </div>
+                    </div>
+
+                    <!-- LITE: Tools / Analysis / Benchmark modules removed -->
+
+                </div>
+
+                <!-- Map Layer -->
+                <select id="mapLayerSelect" class="header-select" title="Choose Map Layer">
+                    <option value="Streets" selected>Streets</option>
+                    <option value="Satellite">Satellite</option>
+                    <option value="Hybrid">Hybrid</option>
+                    <option value="Dark">Dark</option>
+                    <option value="Light">Light</option>
+                </select>
+            </div>
+            <div class="controls">
+                <div class="search-container">
+                    <input type="text" id="searchInput" placeholder="Search (Lat Lng, Site, CI, PCI)"
+                        class="search-input">
+                    <button id="searchBtn" class="search-btn-icon">🔍</button>
+                    <button id="addPointBtn" class="search-btn-icon add-point-btn" title="Add User Point">📍</button>
+                    <button id="rulerBtn" class="search-btn-icon ruler-btn"
+                        title="Ruler Tool (Distance/Bearing)">📏</button>
+                </div>
+                <span id="fileStatus">No file loaded</span>
+            </div>
+
+            <!-- Boundaries Modal -->
+            <div id="boundariesModal" class="modal">
+                <div class="modal-content boundary-modal-content">
+                    <div class="modal-header">
+                        <h3>Admin Zones</h3>
+                        <span class="close" id="closeBoundariesModal">&times;</span>
+                    </div>
+                    <div class="modal-body">
+                        <div class="setting-item">
+                            <label class="setting-label">Direction Régionale</label>
+                            <select id="drSelect" class="form-control boundary-select"
+                                aria-label="Select Direction Régionale" title="Select Direction Régionale">
+                                <option value="">-- Select DR --</option>
+                                <option value="All">Show All</option>
+                                <option value="DR Casa">DR Casa</option>
+                                <option value="DR Rabat">DR Rabat</option>
+                                <option value="DR Fes">DR Fes</option>
+                                <option value="DR Tanger">DR Tanger</option>
+                                <option value="DR Marrakech">DR Marrakech</option>
+                                <option value="DR Agadir">DR Agadir</option>
+                                <option value="DR Oujda">DR Oujda</option>
+                                <option value="DR Beni Mellal">DR Beni Mellal</option>
+                                <option value="DR Errachidia">DR Errachidia</option>
+                                <option value="DR Sud">DR Sud</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label class="setting-label">Regions</label>
+                            <label class="switch">
+                                <input type="checkbox" id="chkRegions" title="Toggle Regions"
+                                    aria-label="Toggle Regions">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                        <div class="setting-item">
+                            <label class="setting-label">Provinces</label>
+                            <label class="switch">
+                                <input type="checkbox" id="chkProvinces" title="Toggle Provinces"
+                                    aria-label="Toggle Provinces">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                        <div class="setting-item">
+                            <label class="setting-label">Communes</label>
+                            <label class="switch">
+                                <input type="checkbox" id="chkCommunes" title="Toggle Communes"
+                                    aria-label="Toggle Communes">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Site Settings Modal -->
+            <!-- Site Settings Panel -->
+            <div id="siteSettingsPanel" class="settings-panel">
+                <h4 class="settings-header">Site Settings</h4>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeSiteDist">Range (m): <span id="valRange">100</span></label>
+                    <input type="range" id="rangeSiteDist" min="10" max="1000" step="5" value="100"
+                        class="setting-input" aria-label="Site Range">
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeIconBeam">Beamwidth (°): <span id="valBeam">35</span></label>
+                    <input type="range" id="rangeIconBeam" min="10" max="180" step="5" value="35" class="setting-input"
+                        aria-label="Icon Beamwidth">
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeSiteOpacity">Opacity: <span
+                            id="valOpacity">0.6</span></label>
+                    <input type="range" id="rangeSiteOpacity" min="0.1" max="1" step="0.1" value="0.6"
+                        class="setting-input" aria-label="Site Opacity">
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label">Border</label>
+                    <div class="site-color-picker-container">
+                        <input type="color" id="pickerStrokeColor" value="#ffffff" class="site-color-picker" aria-label="Border Color">
+                        <span class="setting-label" style="margin-left:8px;font-size:11px;">Color</span>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeStrokeWidth">Border Width: <span id="valStrokeWidth">1</span>px</label>
+                    <input type="range" id="rangeStrokeWidth" min="0" max="6" step="0.5" value="1" class="setting-input" aria-label="Border Width">
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeStrokeOpacity">Border Opacity: <span id="valStrokeOpacity">0.8</span></label>
+                    <input type="range" id="rangeStrokeOpacity" min="0" max="1" step="0.05" value="0.8" class="setting-input" aria-label="Border Opacity">
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="siteColorBy">Color By</label>
+                    <select id="siteColorBy" class="setting-input site-color-mode" aria-label="Site Color Mode">
+                        <option value="tech">Technology</option>
+                        <option value="identity">Cell Identity (RNC/CID)</option>
+                    </select>
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="siteMarkerShape">KML Site Shape</label>
+                    <select id="siteMarkerShape" class="setting-input site-color-mode" aria-label="KML Site Shape">
+                        <option value="diamond">Diamond</option>
+                        <option value="square">Square</option>
+                        <option value="triangle">Triangle</option>
+                        <option value="pentagon">Pentagon</option>
+                        <option value="hexagon">Hexagon</option>
+                        <option value="octagon">Octagon</option>
+                        <option value="star">Star</option>
+                        <option value="cross">Cross</option>
+                        <option value="circle">Circle</option>
+                    </select>
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="pickerSiteColor">Color Override</label>
+                    <div class="site-color-picker-container">
+                        <input type="color" id="pickerSiteColor" value="#3b82f6" class="site-color-picker"
+                            aria-label="Site Color Picker">
+                        <label class="site-checkbox-label" for="checkSiteColorOverride"><input type="checkbox"
+                                id="checkSiteColorOverride">
+                            Apply</label>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label">Labels</label>
+                    <div class="site-names-container">
+                        <label class="site-checkbox-label" for="checkShowSiteNames"><input type="checkbox"
+                                id="checkShowSiteNames"> Show
+                            Site Names</label>
+                        <label class="site-checkbox-label" for="checkShowCellNames"><input type="checkbox"
+                                id="checkShowCellNames"> Show
+                            Cell Names</label>
+                    </div>
+                </div>
+
+                <div class="settings-footer-right">
+                    <button id="closeSiteSettings" class="close-settings-btn">Close</button>
+                </div>
+            </div>
+
+            <!-- Theme Settings Panel -->
+            <div id="themeSettingsPanel" class="settings-panel theme-settings-panel-custom">
+                <h4 class="settings-header">Thematic Analysis</h4>
+
+                <div class="setting-item">
+                    <label class="setting-label">Active Theme</label>
+                    <select id="themeSelect" class="setting-input theme-select" aria-label="Active Theme">
+                        <option value="level">Coverage (RSCP/RSRP)</option>
+                        <option value="quality">Quality (EcNo/RSRQ)</option>
+                    </select>
+                </div>
+
+                <div id="thresholdsContainer" class="thresholds-container">
+                    <!-- Thresholds injected here by JS -->
+                </div>
+
+                <div class="theme-footer">
+                    <button id="resetThemeBtn" class="btn theme-btn-reset">Reset</button>
+                    <div class="theme-footer-actions">
+                        <button id="applyThemeBtn" class="btn theme-btn-apply">Apply</button>
+                        <button id="closeThemeSettings" class="btn theme-btn-close">Close</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stats" id="statsDisplay">
+                <!-- Stats will go here -->
+            </div>
+        </header>
+
+        <main>
+            <div id="logs-sidebar" class="logs-sidebar-flex">
+                <div class="sidebar-resizer sidebar-resizer-right" data-target="logs-sidebar" aria-hidden="true"></div>
+                <h3>Loaded Logs</h3>
+                <div id="logsSearchContainer" class="logs-search-container">
+                    <span class="logs-search-icon">&#9906;</span>
+                    <input id="logsSearchInput" class="logs-search-input" type="text" placeholder="Search metrics / events…" oninput="window.filterLogsList(this.value)" autocomplete="off" spellcheck="false">
+                    <button id="logsSearchClear" class="logs-search-clear" onclick="window.filterLogsList(''); document.getElementById('logsSearchInput').value='';" title="Clear search">&#x2715;</button>
+                </div>
+                <div id="logsList" class="logs-list-container">
+                    <div class="empty-state">No logs loaded</div>
+                </div>
+                <div id="driverViewToggleHost" class="driver-view-toggle-host"></div>
+                <div id="driverVerificationHost" class="driver-verification-host"></div>
+
+                <!-- Docked Views Container REMOVED -->
+            </div>
+
+            <div id="center-pane" class="center-pane">
+                <div id="pairedSignalingHost" style="display:none;"></div>
+                <div id="pairedVerticalResizer" style="display:none;" aria-hidden="true"></div>
+                <div class="map-container" style="position: relative; flex: 1; display: flex; flex-direction: column;">
+                    <div id="map" style="flex: 1; width: 100%; height: 100%; z-index: 1;" ondrop="window.drop(event)" ondragover="window.allowDrop(event)">
+                    </div>
+                    <div id="mapCesiumContainer" aria-label="Vue cartographique 3D"></div>
+                    <div id="bdd-tech-legend" style="display:none; position: absolute; top: 10px; right: 10px; z-index: 1000;">
+                        <div class="bdd-legend-header">
+                            <span id="bddLegendDragHandle" class="bdd-drag-icon" title="Drag to move">&#8285;</span>
+                            <span class="bdd-legend-title-text" contenteditable="true" spellcheck="false">BDD Sectors</span>
+                            <button id="bddLegendToggle" class="bdd-legend-toggle" type="button" title="Masquer la légende BDD" aria-label="Masquer la légende BDD" aria-expanded="true">−</button>
+                        </div>
+                        <div class="bdd-legend-row" data-tech="2G">
+                            <label class="bdd-legend-color-wrap" title="Change 2G color">
+                                <span class="bdd-legend-dot" style="background:#3b82f6;"></span>
+                                <input type="color" class="bdd-legend-color-input" value="#3b82f6" data-tech="2G">
+                            </label>
+                            <span class="bdd-legend-label" data-tech="2G" title="Click to toggle 2G site names">2G &mdash; GSM</span>
+                        </div>
+                        <div class="bdd-legend-row" data-tech="3G">
+                            <label class="bdd-legend-color-wrap" title="Change 3G color">
+                                <span class="bdd-legend-dot" style="background:#f59e0b;"></span>
+                                <input type="color" class="bdd-legend-color-input" value="#f59e0b" data-tech="3G">
+                            </label>
+                            <span class="bdd-legend-label" data-tech="3G" title="Click to toggle 3G site names">3G &mdash; UMTS</span>
+                        </div>
+                        <div class="bdd-legend-row" data-tech="4G">
+                            <label class="bdd-legend-color-wrap" title="Change 4G color">
+                                <span class="bdd-legend-dot" style="background:#ef4444;"></span>
+                                <input type="color" class="bdd-legend-color-input" value="#ef4444" data-tech="4G">
+                            </label>
+                            <span class="bdd-legend-label" data-tech="4G" title="Click to toggle 4G site names">4G &mdash; LTE</span>
+                        </div>
+                        <div class="bdd-legend-row" data-tech="5G">
+                            <label class="bdd-legend-color-wrap" title="Change 5G color">
+                                <span class="bdd-legend-dot" style="background:#8b5cf6;"></span>
+                                <input type="color" class="bdd-legend-color-input" value="#8b5cf6" data-tech="5G">
+                            </label>
+                            <span class="bdd-legend-label" data-tech="5G" title="Click to toggle 5G site names">5G &mdash; NR</span>
+                        </div>
+                    </div>
+                </div>
+                <section id="benchmarkPanel" class="benchmark-panel" aria-label="5G benchmark analysis panel">
+                    <div id="benchmarkPanelHeader" class="benchmark-panel-header">
+                        <div>
+                            <h3 data-i18n="panelTitle">5G Benchmark Analysis</h3>
+                            <p data-i18n="panelSubtitle">IAM vs Orange vs INWI throughput comparison</p>
+                        </div>
+                        <div class="benchmark-panel-header-actions">
+                            <button id="benchmarkChooseFileBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" data-i18n="btnChooseFile">Choose File</button>
+                            <button id="benchmarkNemoImportBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" data-i18n="btnImportNemo">Import Nemo TXT</button>
+                            <button id="benchmarkMycomImportBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Import Mycom</button>
+                            <button id="benchmarkReloadBtn" type="button" class="benchmark-toolbar-btn" data-i18n="btnReload">Reload</button>
+                            <select id="benchmarkActiveSelect" class="benchmark-active-select" title="Benchmark actif — choisir la ville importée à analyser (empêche un rechargement de la remplacer silencieusement)"></select>
+                            <button id="benchmarkNemoAdvancedBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" title="Rapport d'analyse avancée : vue d'ensemble + constats recoupés par preuves (corrélations, chaîne causale, RF comparé, statistique appariée) + actions ciblées sur les pires cellules IAM">🔬 Analyse Avancée</button>
+                            <button id="benchmarkReportBtn" type="button" class="benchmark-toolbar-btn" title="Open the dedicated evidence-driven Benchmark Analysis Report">📘 Benchmark Analysis Report</button>
+                            <button id="benchmarkPaOptimExportBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" title="Generate the PA Optim Benchmark .xlsx (Summary action plan, Serving cells, KPI Metrics) for the current scope">📑 Export PA Optim Benchmark</button>
+                            <button id="benchmarkCopExportBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" title="Generate the COP Benchmark .xlsx: one row per DT (active DL/UL sessions) + a cumulative Synthèse sheet">📊 Export Benchmark COP</button>
+                            <button id="benchmarkStatisticsExportBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" title="Exporter la répartition globale 5G/4G et les bandes NR/LTE du benchmark chargé">📈 Export Benchmark Statistics</button>
+                            <button id="benchmarkArchiveBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" title="Bibliothèque des benchmarks archivés — parcourir par ville, ouvrir, comparer les campagnes mois par mois">📚 Bibliothèque</button>
+                            <button id="benchmarkObsidianBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" title="Exporter toutes les campagnes archivées en coffre Obsidian (notes liées : campagnes, cellules, sites, opérateurs). Vos notes manuelles sont conservées.">🔗 Export Obsidian</button>
+                            <div id="benchmarkViewSwitch" class="benchmark-view-switch" role="group" aria-label="Choisir la présentation de l'analyse Benchmark">
+                                <button id="benchmarkViewClassicBtn" type="button" class="benchmark-view-switch-btn is-active" aria-pressed="true" title="Afficher l'analyse Benchmark historique complète">Analyse classique</button>
+                                <button id="benchmarkViewWorkspaceBtn" type="button" class="benchmark-view-switch-btn" aria-pressed="false" title="Afficher l'Option 2 : workspace professionnel avec TDD n78">Option 2 · Workspace</button>
+                            </div>
+                            <button id="benchmarkLangToggle" type="button" class="benchmark-lang-toggle" title="Passer en français">FR</button>
+                            <button id="benchmarkMinimizeBtn" type="button" class="benchmark-minimize-btn" aria-label="Minimize benchmark panel" title="Minimize">&#8211;</button>
+                            <button id="benchmarkCloseBtn" type="button" class="benchmark-close-btn" aria-label="Close benchmark panel">&times;</button>
+                        </div>
+                    </div>
+                    <!-- resize handles -->
+                    <div class="benchmark-resize-handle benchmark-resize-e" data-dir="e"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-s" data-dir="s"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-se" data-dir="se"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-w" data-dir="w"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-sw" data-dir="sw"></div>
+                    <div class="benchmark-panel-body">
+                        <div id="benchmarkStatus" class="benchmark-status">No benchmark loaded.</div>
+                        <div class="benchmark-filter-grid benchmark-filter-grid--two">
+                            <label class="benchmark-filter-field">
+                                <span>DR</span>
+                                <select id="benchmarkDrFilter" class="form-control">
+                                    <option value="">All DR</option>
+                                </select>
+                            </label>
+                            <label class="benchmark-filter-field">
+                                <span>Ville</span>
+                                <select id="benchmarkVilleFilter" class="form-control">
+                                    <option value="">All villes</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="benchmark-filter-grid benchmark-filter-grid--three">
+                            <label class="benchmark-filter-field">
+                                <span class="benchmark-rank-badge benchmark-rank-badge--iam">IAM Rank</span>
+                                <select id="benchmarkIamRankFilter" class="form-control">
+                                    <option value="">All ranks</option>
+                                    <option value="1">Rank 1</option>
+                                    <option value="2">Rank 2</option>
+                                    <option value="3">Rank 3</option>
+                                </select>
+                            </label>
+                            <label class="benchmark-filter-field">
+                                <span class="benchmark-rank-badge benchmark-rank-badge--orange">Orange Rank</span>
+                                <select id="benchmarkOrangeRankFilter" class="form-control">
+                                    <option value="">All ranks</option>
+                                    <option value="1">Rank 1</option>
+                                    <option value="2">Rank 2</option>
+                                    <option value="3">Rank 3</option>
+                                </select>
+                            </label>
+                            <label class="benchmark-filter-field">
+                                <span class="benchmark-rank-badge benchmark-rank-badge--inwi">INWI Rank</span>
+                                <select id="benchmarkInwiRankFilter" class="form-control">
+                                    <option value="">All ranks</option>
+                                    <option value="1">Rank 1</option>
+                                    <option value="2">Rank 2</option>
+                                    <option value="3">Rank 3</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="benchmark-panel-tools">
+                            <label class="benchmark-checkbox">
+                                <input type="checkbox" id="benchmarkMappedOnly" checked>
+                                <span>Map only points with coordinates</span>
+                            </label>
+                            <button id="benchmarkResetFiltersBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Reset Filters</button>
+                        </div>
+                        <div id="benchmarkSummary" class="benchmark-summary-chart-card">
+                            <div class="benchmark-summary-chart-title">DL Throughput Ranking</div>
+                            <div class="benchmark-summary-chart-wrap">
+                                <canvas id="benchmarkSummaryChart"></canvas>
+                            </div>
+                            <div id="benchmarkSummaryNote" class="benchmark-summary-chart-note"></div>
+                        </div>
+                        <div class="benchmark-legend">
+                            <span class="benchmark-legend-chip benchmark-legend-chip-iam">IAM</span>
+                            <span class="benchmark-legend-chip benchmark-legend-chip-orange">Orange</span>
+                            <span class="benchmark-legend-chip benchmark-legend-chip-inwi">INWI</span>
+                        </div>
+                        <section id="benchmarkNemoSection" class="benchmark-nemo-section">
+                            <div id="benchmarkNemoWorkbench" class="bnwb" hidden>
+                                <div class="bnwb-commandbar">
+                                    <div class="bnwb-campaign">
+                                        <span class="bnwb-eyebrow">BENCHMARK ENGINEERING WORKSPACE</span>
+                                        <strong id="bnwbCampaignTitle">Campagne Benchmark</strong>
+                                        <span id="bnwbCampaignMeta">—</span>
+                                    </div>
+                                    <div class="bnwb-command-controls">
+                                        <button id="bnwbDtPrev" class="bnwb-icon-btn" type="button" aria-label="DT précédent">‹</button>
+                                        <label class="bnwb-control">
+                                            <span>Périmètre</span>
+                                            <select id="bnwbDtScope"></select>
+                                        </label>
+                                        <button id="bnwbDtNext" class="bnwb-icon-btn" type="button" aria-label="DT suivant">›</button>
+                                        <label class="bnwb-control">
+                                            <span>Fenêtre</span>
+                                            <select id="bnwbWindowScope"></select>
+                                        </label>
+                                        <span id="bnwbQuality" class="bnwb-quality">QUALITÉ —</span>
+                                        <button id="bnwbImport" class="bnwb-action bnwb-action--secondary" type="button">Importer</button>
+                                        <button id="bnwbExport" class="bnwb-action" type="button">Exporter</button>
+                                        <button id="bnwbStatisticsExport" class="bnwb-action bnwb-action--secondary" type="button">Stats XLSX</button>
+                                        <button id="bnwbLibrary" class="bnwb-action bnwb-action--secondary" type="button">Bibliothèque</button>
+                                    </div>
+                                </div>
+
+                                <nav class="bnwb-tabs" aria-label="Sections Benchmark">
+                                    <button class="is-active" type="button" data-bnwb-section="dashboard">Dashboard</button>
+                                    <button type="button" data-bnwb-section="overview">Synthèse</button>
+                                    <button type="button" data-bnwb-section="throughput">Débit</button>
+                                    <button type="button" data-bnwb-section="radio">Radio</button>
+                                    <button type="button" data-bnwb-section="ca">CA &amp; MIMO</button>
+                                    <button type="button" data-bnwb-section="cells">Cellules</button>
+                                    <button type="button" data-bnwb-section="evidence">Preuves</button>
+                                    <button type="button" data-bnwb-section="actions">Actions</button>
+                                </nav>
+
+                                <section class="bnwb-dashboard" data-bnwb-block="dashboard" aria-labelledby="bnwbDashboardTitle">
+                                    <div class="bnwb-dashboard-hero">
+                                        <div>
+                                            <span class="bnwb-section-kicker">PILOTAGE BENCHMARK</span>
+                                            <h4 id="bnwbDashboardTitle">Vue comparative dynamique</h4>
+                                            <p>Classement, empreinte radio observée et qualité RF — synchronisés avec le DT et la fenêtre sélectionnés.</p>
+                                        </div>
+                                        <div id="bnwbDashboardScope" class="bnwb-dashboard-scope">Tous les DT · fenêtre active</div>
+                                    </div>
+
+                                    <div class="bnwb-dashboard-layout">
+                                        <article class="bnwb-dashboard-panel bnwb-dashboard-panel--ranking">
+                                            <header><div><span>01 · PERFORMANCE</span><strong>Classement DL</strong></div><small>Débit moyen applicatif · Mbps</small></header>
+                                            <div class="bnwb-dashboard-chart bnwb-dashboard-chart--ranking"><canvas id="bnwbDashboardRanking"></canvas></div>
+                                        </article>
+
+                                        <article class="bnwb-dashboard-panel bnwb-dashboard-panel--presence">
+                                            <header><div><span>02 · EXPOSITION RADIO</span><strong>Présence LTE, 5G et TDD</strong></div><small>% du temps actif · n78 = TDD</small></header>
+                                            <div class="bnwb-dashboard-chart"><canvas id="bnwbDashboardPresence"></canvas></div>
+                                        </article>
+
+                                        <article class="bnwb-dashboard-panel bnwb-dashboard-panel--inventory">
+                                            <header><div><span>03 · INVENTAIRE OBSERVÉ</span><strong>Cellules servantes LTE par bande</strong></div><small id="bnwbDashboardLteMeta">Cellules distinctes résolues ou identifiées</small></header>
+                                            <div class="bnwb-dashboard-chart"><canvas id="bnwbDashboardLteCells"></canvas></div>
+                                        </article>
+
+                                        <article class="bnwb-dashboard-panel bnwb-dashboard-panel--inventory">
+                                            <header><div><span>04 · INVENTAIRE OBSERVÉ</span><strong>Cellules servantes NR par bande</strong></div><small id="bnwbDashboardNrMeta">n28 · n1 · n78</small></header>
+                                            <div class="bnwb-dashboard-chart"><canvas id="bnwbDashboardNrCells"></canvas></div>
+                                        </article>
+
+                                        <article class="bnwb-dashboard-panel bnwb-dashboard-panel--rf">
+                                            <header><div><span>05 · QUALITÉ RADIO</span><strong>Médianes RF et adaptation de lien</strong></div><small>Échelles séparées · No data n'est jamais remplacé par zéro</small></header>
+                                            <div class="bnwb-rf-facets">
+                                                <section><div><strong>RSRP médian</strong><small>dBm</small></div><div class="bnwb-rf-facet-chart"><canvas id="bnwbDashboardRsrp"></canvas></div></section>
+                                                <section><div><strong>SINR médian</strong><small>dB</small></div><div class="bnwb-rf-facet-chart"><canvas id="bnwbDashboardSinr"></canvas></div></section>
+                                                <section><div><strong>CQI médian</strong><small>0–15</small></div><div class="bnwb-rf-facet-chart"><canvas id="bnwbDashboardCqi"></canvas></div></section>
+                                            </div>
+                                            <div id="bnwbDashboardRfSamples" class="bnwb-dashboard-samples"></div>
+                                        </article>
+                                    </div>
+                                    <section class="benchmark-nemo-card" style="margin-top:14px">
+                                        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                                            <div>
+                                                <div class="benchmark-nemo-card-title" style="margin:0">Benchmark Statistics</div>
+                                                <div style="font-size:11px;color:#94a3b8;margin-top:4px">Présence temporelle 5G/4G · bandes · RSRP/SINR de la cellule serveuse · ancre LTE exclue en EN-DC</div>
+                                            </div>
+                                        </div>
+                                        <div class="benchmark-nemo-table-wrap" style="margin-top:10px"><table class="benchmark-config-table benchmark-nemo-table"><thead><tr><th rowspan="2">Opérateur</th><th colspan="2">% Répartition par technologie</th><th colspan="3">% Bande 5G</th><th colspan="4">% Bande 4G</th><th colspan="5">% RSRP 4G (dBm)</th><th colspan="5">% SINR 4G (dB)</th><th colspan="5">% RSRP 5G (dBm)</th><th colspan="5">% SINR 5G (dB)</th></tr><tr><th>5G</th><th>4G</th><th>N1</th><th>N28</th><th>N78</th><th>LTE FDD 2100</th><th>LTE FDD 1800</th><th>LTE FDD 2600</th><th>LTE FDD 800</th><th>≥ -70</th><th>-85 à &lt; -70</th><th>-95 à &lt; -85</th><th>-105 à &lt; -95</th><th>&lt; -105</th><th>≥ 20</th><th>13 à &lt; 20</th><th>0 à &lt; 13</th><th>-3 à &lt; 0</th><th>&lt; -3</th><th>≥ -80</th><th>-90 à &lt; -80</th><th>-100 à &lt; -90</th><th>-110 à &lt; -100</th><th>&lt; -110</th><th>≥ 20</th><th>13 à &lt; 20</th><th>0 à &lt; 13</th><th>-3 à &lt; 0</th><th>&lt; -3</th></tr></thead><tbody data-benchmark-statistics-body></tbody></table></div>
+                                        <div style="font-size:12px;font-weight:700;color:#cbd5e1;margin-top:14px">Couverture et qualité NR par bande</div>
+                                        <div style="font-size:11px;color:#94a3b8;margin-top:3px">Couverture NR : bonne &gt; −105 dBm · intermédiaire de −115 à −105 dBm · mauvaise &lt; −115 dBm · PSCell serveuse uniquement</div>
+                                        <div class="benchmark-nemo-table-wrap" style="margin-top:8px"><table class="benchmark-config-table benchmark-nemo-table"><thead><tr><th rowspan="2">Opérateur</th><th rowspan="2">Bande</th><th rowspan="2">n RSRP</th><th colspan="3">% Couverture NR RSRP</th><th rowspan="2">n SINR</th><th colspan="5">% Qualité SINR</th></tr><tr><th>Bonne &gt; −105</th><th>Intermédiaire −115 à −105</th><th>Mauvaise &lt; −115</th><th>Très bonne</th><th>Bonne</th><th>Moyenne</th><th>Faible</th><th>Critique</th></tr></thead><tbody data-benchmark-nr-band-statistics-body></tbody></table></div>
+                                        <div style="font-size:12px;font-weight:700;color:#cbd5e1;margin-top:14px">Couverture et qualité LTE par bande</div>
+                                        <div class="benchmark-nemo-table-wrap" style="margin-top:8px"><table class="benchmark-config-table benchmark-nemo-table"><thead><tr><th rowspan="2">Opérateur</th><th rowspan="2">Bande</th><th rowspan="2">n RSRP</th><th colspan="5">% Couverture LTE RSRP</th><th rowspan="2">n SINR</th><th colspan="5">% Qualité SINR</th></tr><tr><th>Très bonne</th><th>Bonne</th><th>Moyenne</th><th>Faible</th><th>Critique</th><th>Très bonne</th><th>Bonne</th><th>Moyenne</th><th>Faible</th><th>Critique</th></tr></thead><tbody data-benchmark-lte-band-statistics-body></tbody></table></div>
+                                    </section>
+                                </section>
+
+                                <div class="bnwb-main">
+                                    <div class="bnwb-compare" id="bnwbOverview">
+                                        <div class="bnwb-grid bnwb-grid--head">
+                                            <div class="bnwb-row-label">Comparaison opérateurs</div>
+                                            <div class="bnwb-operator bnwb-operator--iam"><span>IAM</span><small id="bnwbIamStatus">—</small></div>
+                                            <div class="bnwb-operator bnwb-operator--orange"><span>ORANGE</span><small id="bnwbOrangeStatus">—</small></div>
+                                            <div class="bnwb-operator bnwb-operator--inwi"><span>INWI</span><small id="bnwbInwiStatus">—</small></div>
+                                        </div>
+
+                                        <section class="bnwb-matrix-row" data-bnwb-block="throughput">
+                                            <div class="bnwb-grid bnwb-grid--cards">
+                                                <div class="bnwb-row-label">
+                                                    <span class="bnwb-section-kicker">PERFORMANCE DL</span>
+                                                    <strong>Classement et profil</strong>
+                                                    <small>Débit applicatif · fenêtre DL active</small>
+                                                </div>
+                                                <article class="bnwb-kpi-card bnwb-kpi-card--iam" data-operator="IAM">
+                                                    <div class="bnwb-rank"><span id="bnwbIamRank">#—</span><small>rang</small></div>
+                                                    <div class="bnwb-primary-kpi"><strong id="bnwbIamDlAvg">—</strong><span>Mbps moyen</span></div>
+                                                    <div class="bnwb-secondary-kpi"><span>Médiane</span><strong id="bnwbIamDlMedian">—</strong></div>
+                                                    <div class="bnwb-mini-chart"><canvas id="bnwbIamProfile"></canvas></div>
+                                                </article>
+                                                <article class="bnwb-kpi-card bnwb-kpi-card--orange" data-operator="ORANGE">
+                                                    <div class="bnwb-rank"><span id="bnwbOrangeRank">#—</span><small>rang</small></div>
+                                                    <div class="bnwb-primary-kpi"><strong id="bnwbOrangeDlAvg">—</strong><span>Mbps moyen</span></div>
+                                                    <div class="bnwb-secondary-kpi"><span>Médiane</span><strong id="bnwbOrangeDlMedian">—</strong></div>
+                                                    <div class="bnwb-mini-chart"><canvas id="bnwbOrangeProfile"></canvas></div>
+                                                </article>
+                                                <article class="bnwb-kpi-card bnwb-kpi-card--inwi" data-operator="INWI">
+                                                    <div class="bnwb-rank"><span id="bnwbInwiRank">#—</span><small>rang</small></div>
+                                                    <div class="bnwb-primary-kpi"><strong id="bnwbInwiDlAvg">—</strong><span>Mbps moyen</span></div>
+                                                    <div class="bnwb-secondary-kpi"><span>Médiane</span><strong id="bnwbInwiDlMedian">—</strong></div>
+                                                    <div class="bnwb-mini-chart"><canvas id="bnwbInwiProfile"></canvas></div>
+                                                </article>
+                                            </div>
+                                        </section>
+
+                                        <section class="bnwb-matrix-row" data-bnwb-block="radio">
+                                            <div class="bnwb-grid bnwb-grid--cards">
+                                                <div class="bnwb-row-label">
+                                                    <span class="bnwb-section-kicker">QUALITÉ RADIO</span>
+                                                    <strong>RF et exposition 5G</strong>
+                                                    <small>Les présences utilisent le temps DL actif comme dénominateur</small>
+                                                </div>
+                                                <article class="bnwb-radio-card" data-operator="IAM">
+                                                    <div class="bnwb-metric"><span>RSRP médian</span><strong id="bnwbIamRsrp">—</strong></div>
+                                                    <div class="bnwb-metric"><span>SINR médian</span><strong id="bnwbIamSinr">—</strong></div>
+                                                    <div class="bnwb-presence"><span>Présence 5G</span><strong id="bnwbIam5g">—</strong></div>
+                                                    <div class="bnwb-presence bnwb-presence--tdd" title="Pourcentage de toute la fenêtre DL active pendant laquelle la bande TDD n78 est détectée"><span>Présence TDD n78</span><strong id="bnwbIamTdd">—</strong></div>
+                                                </article>
+                                                <article class="bnwb-radio-card" data-operator="ORANGE">
+                                                    <div class="bnwb-metric"><span>RSRP médian</span><strong id="bnwbOrangeRsrp">—</strong></div>
+                                                    <div class="bnwb-metric"><span>SINR médian</span><strong id="bnwbOrangeSinr">—</strong></div>
+                                                    <div class="bnwb-presence"><span>Présence 5G</span><strong id="bnwbOrange5g">—</strong></div>
+                                                    <div class="bnwb-presence bnwb-presence--tdd" title="Pourcentage de toute la fenêtre DL active pendant laquelle la bande TDD n78 est détectée"><span>Présence TDD n78</span><strong id="bnwbOrangeTdd">—</strong></div>
+                                                </article>
+                                                <article class="bnwb-radio-card" data-operator="INWI">
+                                                    <div class="bnwb-metric"><span>RSRP médian</span><strong id="bnwbInwiRsrp">—</strong></div>
+                                                    <div class="bnwb-metric"><span>SINR médian</span><strong id="bnwbInwiSinr">—</strong></div>
+                                                    <div class="bnwb-presence"><span>Présence 5G</span><strong id="bnwbInwi5g">—</strong></div>
+                                                    <div class="bnwb-presence bnwb-presence--tdd" title="Pourcentage de toute la fenêtre DL active pendant laquelle la bande TDD n78 est détectée"><span>Présence TDD n78</span><strong id="bnwbInwiTdd">—</strong></div>
+                                                </article>
+                                            </div>
+                                        </section>
+
+                                        <section class="bnwb-matrix-row" data-bnwb-block="ca">
+                                            <div class="bnwb-grid bnwb-grid--cards">
+                                                <div class="bnwb-row-label">
+                                                    <span class="bnwb-section-kicker">CAPACITÉ RADIO</span>
+                                                    <strong>CA, modulation et RI</strong>
+                                                    <small>Utilisation DL observée · sans déduire la capacité du seul RSRP</small>
+                                                </div>
+                                                <article class="bnwb-ca-card" data-operator="IAM"><div class="bnwb-donut"><canvas id="bnwbIamCa"></canvas></div><div id="bnwbIamCaText" class="bnwb-ca-copy">—</div></article>
+                                                <article class="bnwb-ca-card" data-operator="ORANGE"><div class="bnwb-donut"><canvas id="bnwbOrangeCa"></canvas></div><div id="bnwbOrangeCaText" class="bnwb-ca-copy">—</div></article>
+                                                <article class="bnwb-ca-card" data-operator="INWI"><div class="bnwb-donut"><canvas id="bnwbInwiCa"></canvas></div><div id="bnwbInwiCaText" class="bnwb-ca-copy">—</div></article>
+                                            </div>
+                                        </section>
+                                    </div>
+
+                                    <aside class="bnwb-evidence" data-bnwb-block="evidence">
+                                        <div class="bnwb-evidence-head"><span>PREUVES &amp; DIAGNOSTIC</span><strong id="bnwbEvidenceBadge">VALIDATION</strong></div>
+                                        <div id="bnwbEvidenceBody" class="bnwb-evidence-body"></div>
+                                    </aside>
+                                </div>
+
+                                <section class="bnwb-timeline" data-bnwb-block="throughput">
+                                    <div class="bnwb-panel-heading"><div><span>PROFIL SYNCHRONISÉ</span><strong>Débit DL par DT</strong></div><small>IAM · Orange · INWI</small></div>
+                                    <div class="bnwb-timeline-chart"><canvas id="bnwbTimeline"></canvas></div>
+                                </section>
+
+                                <section class="bnwb-dt-table" data-bnwb-block="cells">
+                                    <div class="bnwb-panel-heading"><div><span>COMPARAISON TERRAIN</span><strong>DT appariés</strong></div><small id="bnwbMatchedMeta">—</small></div>
+                                    <div class="bnwb-table-wrap"><table><thead><tr><th>DT</th><th>IAM DL</th><th>Orange DL</th><th>INWI DL</th><th>Écart leader</th><th>Qualité</th></tr></thead><tbody id="bnwbMatchedBody"></tbody></table></div>
+                                </section>
+                            </div>
+                            <div class="benchmark-nemo-section-header">
+                                <div>
+                                    <h4>Nemo TXT Benchmark Analysis</h4>
+                                    <p id="benchmarkNemoMeta">No Nemo TXT benchmark loaded.</p>
+                                    <div id="benchmarkNemoDtScope" class="benchmark-nemo-dt-scope" hidden>
+                                        <span class="benchmark-nemo-dt-scope-label" data-i18n="dtScopeLabel">Analysis scope:</span>
+                                        <button type="button" id="benchmarkNemoDtScopePrev" class="benchmark-nemo-dt-nav" aria-label="Previous DT">◀</button>
+                                        <select id="benchmarkNemoDtScopeSelect" class="benchmark-nemo-dt-select"></select>
+                                        <button type="button" id="benchmarkNemoDtScopeNext" class="benchmark-nemo-dt-nav" aria-label="Next DT">▶</button>
+                                        <span id="benchmarkNemoDtScopeStatus" class="benchmark-nemo-dt-pos"></span>
+                                    </div>
+                                    <div id="benchmarkNemoWindowScope" class="benchmark-nemo-dt-scope" hidden>
+                                        <span class="benchmark-nemo-dt-scope-label" data-i18n="windowScopeLabel">Window filter:</span>
+                                        <select id="benchmarkNemoWindowScopeSelect" class="benchmark-nemo-dt-select"></select>
+                                        <span id="benchmarkNemoWindowScopeStatus" class="benchmark-nemo-dt-pos"></span>
+                                    </div>
+                                    <div id="benchmarkNemoModeControls" class="benchmark-nemo-mode-controls" hidden>
+                                        <button id="benchmarkNemoExpressBtn" type="button" class="benchmark-nemo-mode-btn" aria-pressed="false">Express analysis</button>
+                                        <button id="benchmarkNemoDetailedBtn" type="button" class="benchmark-nemo-mode-btn" aria-pressed="false">Detailled analysis</button>
+                                        <button id="benchmarkNemoMacroBtn" type="button" class="benchmark-nemo-mode-btn" aria-pressed="false">Macro</button>
+                                        <button id="benchmarkNemoEmaBtn" type="button" class="benchmark-nemo-mode-btn benchmark-nemo-mode-btn--ema" aria-pressed="false">EMA Analysis</button>
+                                    </div>
+                                    <div id="benchmarkNemoModePrompt" class="benchmark-nemo-mode-prompt" hidden>Import completed. Choose an analysis mode to display the benchmark.</div>
+                                    <div id="benchmarkNemoRankingCard" class="benchmark-nemo-card" style="margin-top:12px;">
+                                        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                                            <div class="benchmark-nemo-card-title" style="margin:0;">DL Ranking</div>
+                                            <div id="benchmarkNemoRankingMetricToggle" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+                                        </div>
+                                        <div class="benchmark-nemo-chart-wrap">
+                                            <canvas id="benchmarkNemoRankingChart"></canvas>
+                                        </div>
+                                        <div id="benchmarkNemoRankingNote" class="benchmark-nemo-chart-note"></div>
+                                    </div>
+                            <div id="benchmarkNemoIamServingCells" class="benchmark-nemo-serving-cells" style="display:none;"></div>
+                            <div id="benchmarkNemoOrangeServingCells" class="benchmark-nemo-serving-cells" style="display:none; margin-top: 10px;"></div>
+                            <div id="benchmarkNemoInwiServingCells" class="benchmark-nemo-serving-cells" style="display:none; margin-top: 10px;"></div>
+                            <div id="benchmarkStatisticsCard" class="benchmark-nemo-card" style="display:none;margin-top:12px;margin-bottom:16px">
+                                <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                                    <div>
+                                        <div class="benchmark-nemo-card-title" style="margin:0">Benchmark Statistics</div>
+                                        <div style="font-size:11px;color:#94a3b8;margin-top:4px">Présence temporelle 5G/4G · bandes · RSRP/SINR de la cellule serveuse · ancre LTE exclue en EN-DC</div>
+                                    </div>
+                                    <button type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" data-benchmark-statistics-export>Exporter XLSX</button>
+                                </div>
+                                <div class="benchmark-nemo-table-wrap" style="margin-top:10px"><table class="benchmark-config-table benchmark-nemo-table"><thead><tr><th rowspan="2">Opérateur</th><th colspan="2">% Répartition par technologie</th><th colspan="3">% Bande 5G</th><th colspan="4">% Bande 4G</th><th colspan="5">% RSRP 4G (dBm)</th><th colspan="5">% SINR 4G (dB)</th><th colspan="5">% RSRP 5G (dBm)</th><th colspan="5">% SINR 5G (dB)</th></tr><tr><th>5G</th><th>4G</th><th>N1</th><th>N28</th><th>N78</th><th>LTE FDD 2100</th><th>LTE FDD 1800</th><th>LTE FDD 2600</th><th>LTE FDD 800</th><th>≥ -70</th><th>-85 à &lt; -70</th><th>-95 à &lt; -85</th><th>-105 à &lt; -95</th><th>&lt; -105</th><th>≥ 20</th><th>13 à &lt; 20</th><th>0 à &lt; 13</th><th>-3 à &lt; 0</th><th>&lt; -3</th><th>≥ -80</th><th>-90 à &lt; -80</th><th>-100 à &lt; -90</th><th>-110 à &lt; -100</th><th>&lt; -110</th><th>≥ 20</th><th>13 à &lt; 20</th><th>0 à &lt; 13</th><th>-3 à &lt; 0</th><th>&lt; -3</th></tr></thead><tbody data-benchmark-statistics-body></tbody></table></div>
+                                <div style="font-size:12px;font-weight:700;color:#cbd5e1;margin-top:14px">Couverture et qualité NR par bande</div>
+                                <div style="font-size:11px;color:#94a3b8;margin-top:3px">Couverture NR : bonne &gt; −105 dBm · intermédiaire de −115 à −105 dBm · mauvaise &lt; −115 dBm · PSCell serveuse uniquement</div>
+                                <div class="benchmark-nemo-table-wrap" style="margin-top:8px"><table class="benchmark-config-table benchmark-nemo-table"><thead><tr><th rowspan="2">Opérateur</th><th rowspan="2">Bande</th><th rowspan="2">n RSRP</th><th colspan="3">% Couverture NR RSRP</th><th rowspan="2">n SINR</th><th colspan="5">% Qualité SINR</th></tr><tr><th>Bonne &gt; −105</th><th>Intermédiaire −115 à −105</th><th>Mauvaise &lt; −115</th><th>Très bonne</th><th>Bonne</th><th>Moyenne</th><th>Faible</th><th>Critique</th></tr></thead><tbody data-benchmark-nr-band-statistics-body></tbody></table></div>
+                                <div style="font-size:12px;font-weight:700;color:#cbd5e1;margin-top:14px">Couverture et qualité LTE par bande</div>
+                                <div class="benchmark-nemo-table-wrap" style="margin-top:8px"><table class="benchmark-config-table benchmark-nemo-table"><thead><tr><th rowspan="2">Opérateur</th><th rowspan="2">Bande</th><th rowspan="2">n RSRP</th><th colspan="5">% Couverture LTE RSRP</th><th rowspan="2">n SINR</th><th colspan="5">% Qualité SINR</th></tr><tr><th>Très bonne</th><th>Bonne</th><th>Moyenne</th><th>Faible</th><th>Critique</th><th>Très bonne</th><th>Bonne</th><th>Moyenne</th><th>Faible</th><th>Critique</th></tr></thead><tbody data-benchmark-lte-band-statistics-body></tbody></table></div>
+                            </div>
+                                </div>
+                            </div>
+                            <div id="benchmarkNemoScorecardCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Executive scorecard</div>
+                                <div id="benchmarkNemoScorecardMeta" style="color:#64748b;font-size:11px;margin-bottom:10px">Per-operator winner by dimension (this DT). n=1 drive test — directional, not statistically significant.</div>
+                                <div id="benchmarkNemoScorecardBody"></div>
+                            </div>
+
+                            <!-- Evidence-gated decision view: populated when the professional backend contract is available. -->
+                            <div id="benchmarkNemoEvidenceGated" class="benchmark-nemo-card" style="display:none;margin-bottom:16px"></div>
+
+                            <div id="benchmarkNemoCaCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                <div class="benchmark-nemo-card-title" style="margin:0 0 8px 0">Agrégation de porteuses (CA)</div>
+                                <div id="benchmarkNemoCaBody"></div>
+                            </div>
+
+                            <div id="benchmarkNemoCaCombosCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                <div class="benchmark-nemo-card-title" style="margin:0 0 8px 0">Cellules servantes &amp; combinaisons CA (bandes)</div>
+                                <div id="benchmarkNemoCaCombosBody"></div>
+                            </div>
+
+                            <div id="benchmarkNemoMacroCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+                                    <div>
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Macro diagnosis</div>
+                                        <div id="benchmarkNemoMacroHeader" style="color:#64748b;font-size:11px;line-height:1.5"></div>
+                                    </div>
+                                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                                        <label style="display:flex;align-items:center;gap:6px;color:#94a3b8;font-size:11px">
+                                            <span>DT type</span>
+                                            <select id="benchmarkNemoMacroDtTypeSelect" class="benchmark-nemo-dt-select" style="min-width:120px">
+                                                <option value="Auto">Auto</option>
+                                                <option value="Static">Static</option>
+                                                <option value="Mobility">Mobility</option>
+                                                <option value="Indoor">Indoor</option>
+                                                <option value="Event">Event</option>
+                                            </select>
+                                        </label>
+                                        <button id="benchmarkNemoMacroResetThresholdsBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Reset thresholds</button>
+                                        <button id="benchmarkNemoMacroExportProfileBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Export profile</button>
+                                        <button id="benchmarkNemoMacroImportProfileBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Import file</button>
+                                        <button id="benchmarkNemoMacroPasteProfileBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Paste JSON</button>
+                                        <input id="benchmarkNemoMacroImportInput" type="file" accept=".json,application/json" hidden>
+                                    </div>
+                                </div>
+                                <div id="benchmarkNemoMacroBody"></div>
+                                <details style="margin-top:12px;border-top:1px solid var(--bn-divider);padding-top:10px">
+                                    <summary style="cursor:pointer;color:#cbd5e1;font-size:11px;font-weight:700">Thresholds</summary>
+                                    <div id="benchmarkNemoMacroThresholds" style="margin-top:10px"></div>
+                                </details>
+                            </div>
+
+                            <div class="bn-section" data-bn-section="throughput" style="display:none">
+                                <button type="button" class="bn-section-header" aria-expanded="true">Throughput &amp; Capacity</button>
+                                <div class="bn-section-body">
+                                    <!-- DL Throughput Timeline — first visible content after title -->
+                                    <div id="benchmarkNemoDlTimelineCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                                            <div class="benchmark-nemo-card-title" id="benchmarkNemoDlTimelineTitle" style="margin:0;border-bottom:none;padding-bottom:0">Multi-operator DL Throughput Overview</div>
+                                            <div id="benchmarkNemoDlMetricToggle" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+                                        </div>
+                                        <div style="height:280px;position:relative">
+                                            <canvas id="benchmarkNemoDlTimelineChart"></canvas>
+                                        </div>
+                                        <div id="benchmarkNemoDlTimelineStats" style="margin-top:11px;padding-top:10px;border-top:1px solid var(--bn-divider);display:flex;flex-wrap:wrap;gap:4px 20px;align-items:center"></div>
+                                        <div style="margin-top:6px;font-size:10px;color:#64748b;line-height:1.6">
+                                            <strong style="color:#94a3b8">avg app</strong> = mean of application throughput samples (the plotted curve) ·
+                                            <strong style="color:#94a3b8">DL avg</strong> = byte-based KPI = total bytes&times;8 / DL duration <em>(use this for official ranking)</em> ·
+                                            <strong style="color:#34d399">steady</strong> = mean of samples after the ramp-up marker <em>(sustained capacity)</em> ·
+                                            <strong style="color:#94a3b8">max</strong> = peak sample.
+                                            Tip: enable <strong>⇥ Offset</strong> for an elapsed-seconds x-axis, or see the per-operator <strong>DL Throughput Profile</strong> below for a clean time-from-DREQ (0&nbsp;&rarr;&nbsp;duration) view.
+                                        </div>
+                                        <div id="benchmarkNemoSlowStartNote" class="benchmark-nemo-callout" hidden></div>
+                                        <div id="benchmarkNemoDlMarkerLegend" style="display:none;border-top:1px solid var(--bn-divider);margin-top:8px;padding-top:6px"></div>
+                                        <div id="benchmarkNemoDlLayerGap" style="margin-top:10px"></div>
+                                    </div>
+
+                                    <!-- Startup latency: connect (DAA->DAC) + request (DAC->DREQ) = delay to start download -->
+                                    <div id="benchmarkNemoStartupLatencyCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Startup latency — delay to download start (per operator)</div>
+                                        <div style="color:#64748b;font-size:11px;margin-bottom:12px">Delay from session start to download request (download session Event IDs) = <span style="color:#06b6d4">connect</span> (DAA→DAC) + <span style="color:#818cf8">request</span> (DAC→DREQ). Shorter is better.</div>
+                                        <div style="height:170px;position:relative">
+                                            <canvas id="benchmarkNemoStartupLatencyChart"></canvas>
+                                        </div>
+                                    </div>
+
+                                    <!-- Upload throughput (one completed HTTP upload per canonical DT) -->
+                                    <div id="benchmarkNemoUploadCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Upload throughput (per operator)</div>
+                                        <div style="color:#64748b;font-size:11px;margin-bottom:12px">Selected scope — mean application UL throughput across canonical DTs (Bytes UL × 8 / transfer time). Higher is better.</div>
+                                        <div style="height:180px;position:relative">
+                                            <canvas id="benchmarkNemoUploadChart"></canvas>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="bn-section" data-bn-section="reliability" style="display:none">
+                                <button type="button" class="bn-section-header" aria-expanded="true">Latency &amp; Reliability</button>
+                                <div class="bn-section-body">
+                                    <!-- Latency & reliability (transfer status per operator) -->
+                                    <div id="benchmarkNemoReliabilityCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 8px 0">Latency &amp; reliability (per operator)</div>
+                                        <div id="benchmarkNemoReliabilityBody"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="bn-section" data-bn-section="rf" style="display:none">
+                                <button type="button" class="bn-section-header" aria-expanded="true">RF Diagnosis</button>
+                                <div class="bn-section-body">
+                                    <!-- Authoritative RF & layer split, scoped to the download session by Nemo -->
+                                    <div id="benchmarkNemoAuthRfCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Download-session RF &amp; layer split</div>
+                                        <div style="color:#64748b;font-size:11px;margin-bottom:10px">RF/PHY averaged over the download transfer window. <strong>Note:</strong> in EN-DC the device is on 5G <em>and</em> LTE at once, so <em>5G presence</em> (% of time in EN-DC) and <em>Layer split</em> (% of PDSCH bytes carried by the NR vs LTE leg) are different — e.g. 100% 5G presence with 19% on the LTE anchor is normal.</div>
+                                        <div id="benchmarkNemoAuthRfBody"></div>
+                                    </div>
+
+                                    <!-- DL Throughput Layer Analysis (App -> MAC -> PHY) -->
+                                    <div id="benchmarkNemoLayerAnalysis" class="benchmark-nemo-card" style="display:none;margin-bottom:16px;overflow:hidden"></div>
+
+                                    <!-- DL Throughput Profile — 3 stacked per-operator charts -->
+                                    <div id="benchmarkNemoDlProfileCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div class="benchmark-nemo-card-title">DL Throughput Profile</div>
+                                        <div style="color:#64748b;font-size:11px;margin-bottom:12px">Throughput vs. time from DREQ (HTTP request). <span style="color:#fbbf24">■</span> DL avg (byte-based KPI) &nbsp; <span style="color:#34d399">■</span> Steady-state (post ramp-up) &nbsp; Shaded = ramp-up / stabilization zone.</div>
+                                        <div id="benchmarkNemoDlProfileChartsWrap"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+
+                            <!-- Root cause banner -->
+                            <div id="benchmarkNemoSummary" class="benchmark-nemo-summary"></div>
+
+                            <!-- 1. Distribution charts under DL timeline -->
+                            <div class="benchmark-nemo-grid" id="benchmarkNemoKeyChartsGrid">
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title" data-i18n="secPdschModulation">PDSCH Modulation & Spectral Efficiency</div>
+                                    <div id="benchmarkNemoModulationCharts" class="benchmark-nemo-mini-pies"></div>
+                                    <div id="benchmarkNemoModulationPieNote" class="benchmark-nemo-chart-note"></div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title" data-i18n="secBandExposure">NR Band Exposure Analysis</div>
+                                    <div id="benchmarkNemoBandCharts" class="benchmark-nemo-mini-pies"></div>
+                                    <div id="benchmarkNemoBandPieNote" class="benchmark-nemo-chart-note"></div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title" data-i18n="secCaScells">Carrier Aggregation / SCells Analysis</div>
+                                    <div id="benchmarkNemoCaCharts" class="benchmark-nemo-mini-pies"></div>
+                                    <div id="benchmarkNemoCaPieNote" class="benchmark-nemo-chart-note"></div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title" data-i18n="secMimoRank">MIMO Rank Analysis</div>
+                                    <div id="benchmarkNemoMimoCharts" class="benchmark-nemo-mini-pies"></div>
+                                    <div id="benchmarkNemoMimoPieNote" class="benchmark-nemo-chart-note"></div>
+                                </div>
+                            </div>
+
+                            <!-- 1b. Professional Executive Summary -->
+                            <div id="benchmarkNemoProfExecSummary" class="benchmark-nemo-card" style="display:none;"></div>
+
+                            <!-- 1c. EMA KPI Table -->
+                            <div id="benchmarkNemoEmaPanel" class="benchmark-nemo-card" style="display:none;"></div>
+
+                            <!-- 2. Executive Conclusion -->
+                            <div id="benchmarkNemoExecutiveConclusion" class="benchmark-nemo-card"></div>
+
+                            <!-- 3. Operators table -->
+                            <div id="benchmarkNemoOperatorsCard" class="benchmark-nemo-table-card">
+                                <div class="benchmark-nemo-card-title">Operators</div>
+                                <div class="benchmark-nemo-table-wrap">
+                                    <table class="benchmark-config-table benchmark-nemo-table">
+                                        <thead>
+                                            <tr>
+                                                <th data-i18n="thRank">Rank</th>
+                                                <th data-i18n="thOperator">Operator</th>
+                                                <th data-i18n="th5gStatus">5G Status</th>
+                                                <th data-i18n="thAvgDl">Avg DL</th>
+                                                <th data-i18n="thAvgDlAppRate">Avg DL (App. rate DL)</th>
+                                                <th data-i18n="thMedianDl">Median DL</th>
+                                                <th data-i18n="thTests">Tests</th>
+                                                <th data-i18n="thSuccess">Success</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="benchmarkNemoOperatorsBody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- 3b. Data transfer per DT (download/upload completion) -->
+                            <div id="benchmarkNemoTransfersCard" class="benchmark-nemo-table-card">
+                                <div class="benchmark-nemo-card-title" data-i18n="thTransfersTitle">Data transfer per DT (download / upload completion)</div>
+                                <div id="benchmarkNemoTransfersSummary" class="benchmark-nemo-transfers-summary"></div>
+                                <div id="benchmarkNemoTransfersControls" class="benchmark-nemo-transfers-controls">
+                                    <button type="button" id="benchmarkNemoTransfersPrev" class="benchmark-nemo-dt-nav" aria-label="Previous DT">◀</button>
+                                    <select id="benchmarkNemoTransfersSelect" class="benchmark-nemo-dt-select"></select>
+                                    <button type="button" id="benchmarkNemoTransfersNext" class="benchmark-nemo-dt-nav" aria-label="Next DT">▶</button>
+                                    <span id="benchmarkNemoTransfersPos" class="benchmark-nemo-dt-pos"></span>
+                                </div>
+                                <div class="benchmark-nemo-table-wrap">
+                                    <table class="benchmark-config-table benchmark-nemo-table">
+                                        <thead>
+                                            <tr>
+                                                <th data-i18n="thOperator">Operator</th>
+                                                <th data-i18n="thMeasurementBj">Measurement (BJ)</th>
+                                                <th data-i18n="thDirection">Direction</th>
+                                                <th data-i18n="thTarget">Target</th>
+                                                <th data-i18n="thTransferred">Transferred</th>
+                                                <th data-i18n="thCompletion">Completion %</th>
+                                                <th data-i18n="thStatus">Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="benchmarkNemoTransfersBody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- 4. NR Band Exposure -->
+                            <div id="benchmarkNemoBandExposure" class="benchmark-nemo-table-card"></div>
+
+                            <!-- Remaining analysis sections -->
+                            <div id="benchmarkNemoRankingInterpretation" class="benchmark-nemo-card"></div>
+                            <div id="benchmarkNemoTechnologyStatus" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoMycomContext" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoDiagnosis" class="benchmark-nemo-diagnosis"></div>
+                            <div id="benchmarkNemoDeep" class="benchmark-nemo-deep" style="display:none;"></div>
+                            <div id="benchmarkNemoBest5gComparator" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoWeaknessChain" class="benchmark-nemo-card"></div>
+                            <div id="benchmarkNemoRfExclusion" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoSchedulerPrb" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoPdschModulation" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoCaScells" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoMimoRank" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoBlerRetx" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoTransportGap" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoRecommendations" class="benchmark-nemo-card"></div>
+                            <div id="benchmarkNemoRulesApplied" class="benchmark-nemo-card"></div>
+                            <div id="benchmarkNemoQaChecklist" class="benchmark-nemo-table-card"></div>
+
+                            <!-- Missing KPI — collapsible -->
+                            <div id="benchmarkNemoMissingKpiWrap" class="benchmark-nemo-collapsible">
+                                <button class="benchmark-nemo-collapse-toggle" id="benchmarkNemoMissingKpiToggle" aria-expanded="false">
+                                    <span class="benchmark-nemo-collapse-icon">▶</span>
+                                    Missing KPI / Export Quality
+                                </button>
+                                <div id="benchmarkNemoMissingKpi" class="benchmark-nemo-table-card benchmark-nemo-collapse-body" hidden></div>
+                            </div>
+
+                            <!-- Extra charts grid -->
+                            <div class="benchmark-nemo-grid" id="benchmarkNemoChartsGrid">
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title">DL Throughput Ranking (Avg vs Median)</div>
+                                    <div class="benchmark-nemo-chart-wrap">
+                                        <canvas id="benchmarkNemoAvgVsMedianChart"></canvas>
+                                    </div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title">RF Comparison — 5G Operators</div>
+                                    <div class="benchmark-nemo-chart-wrap">
+                                        <canvas id="benchmarkNemoRfChart"></canvas>
+                                    </div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title">Root Cause Score</div>
+                                    <div class="benchmark-nemo-chart-wrap">
+                                        <canvas id="benchmarkNemoRootCauseChart"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+                </section>
+                <section id="statisticsPanel" class="benchmark-panel statistics-panel" aria-label="Mycom statistics analysis panel">
+                    <div id="statisticsPanelHeader" class="benchmark-panel-header">
+                        <div>
+                            <h3>Statistic Analysis</h3>
+                            <p>Mycom hourly export anomaly detection and cell/site investigation</p>
+                        </div>
+                        <div class="benchmark-panel-header-actions">
+                            <button id="statisticsImportBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Import Mycom</button>
+                            <button id="statisticsReloadBtn" type="button" class="benchmark-toolbar-btn">Reload</button>
+                            <button id="statisticsCloseBtn" type="button" class="benchmark-close-btn" aria-label="Close statistics panel">&times;</button>
+                        </div>
+                    </div>
+                    <div class="benchmark-resize-handle benchmark-resize-e" data-dir="e"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-s" data-dir="s"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-se" data-dir="se"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-w" data-dir="w"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-sw" data-dir="sw"></div>
+                    <div class="benchmark-panel-body">
+                        <div id="statisticsStatus" class="benchmark-status">No Mycom statistics export loaded.</div>
+                        <div id="statisticsThresholdsCard" class="benchmark-nemo-card">
+                            <div class="benchmark-nemo-card-title">Anomaly Thresholds</div>
+                            <div id="statisticsThresholdsGrid" class="benchmark-mycom-threshold-grid"></div>
+                        </div>
+                        <div id="statisticsSummaryCard" class="benchmark-nemo-card">
+                            <div class="benchmark-nemo-card-title">Global Anomaly Summary</div>
+                            <div id="statisticsSummaryChips" class="benchmark-mycom-context-chips"></div>
+                            <div class="benchmark-panel-tools" style="margin-top:12px;">
+                                <label class="benchmark-filter-field" style="min-width:260px;">
+                                    <span>Anomaly filter</span>
+                                    <select id="statisticsAnomalyFilter" class="form-control">
+                                        <option value="">All anomalies</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <div id="statisticsSummaryTable" class="benchmark-nemo-table-wrap" style="margin-top:12px;"></div>
+                        </div>
+                        <div id="statisticsChartsCard" class="benchmark-nemo-grid">
+                            <div class="benchmark-nemo-card">
+                                <div class="benchmark-nemo-card-title">Anomaly Distribution</div>
+                                <div class="benchmark-nemo-chart-wrap">
+                                    <canvas id="statisticsAnomalyChart"></canvas>
+                                </div>
+                                <div id="statisticsAnomalyChartNote" class="benchmark-nemo-chart-note"></div>
+                            </div>
+                            <div class="benchmark-nemo-card">
+                                <div class="benchmark-nemo-card-title">Hourly KPI Evolution</div>
+                                <div class="benchmark-nemo-chart-wrap">
+                                    <canvas id="statisticsHourlyChart"></canvas>
+                                </div>
+                                <div id="statisticsHourlyChartNote" class="benchmark-nemo-chart-note"></div>
+                            </div>
+                        </div>
+                        <div id="statisticsTopCellsCard" class="benchmark-nemo-table-card">
+                            <div class="benchmark-nemo-card-title">Most Affected Cells</div>
+                            <div id="statisticsTopCellsTable" class="benchmark-nemo-table-wrap"></div>
+                        </div>
+                        <div id="statisticsSearchCard" class="benchmark-nemo-card">
+                            <div class="benchmark-nemo-card-title">Cell / Site Investigation</div>
+                            <div class="benchmark-panel-tools" style="margin-top:8px;">
+                                <label class="benchmark-filter-field" style="flex:1; min-width:280px;">
+                                    <span>Cell or site name</span>
+                                    <input id="statisticsQueryInput" type="text" class="form-control" placeholder="Type a cell name, gNB key, or site name">
+                                </label>
+                                <button id="statisticsQueryBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Run analysis</button>
+                                <button id="statisticsQueryClearBtn" type="button" class="benchmark-toolbar-btn">Clear</button>
+                            </div>
+                            <div id="statisticsSearchSummary" class="benchmark-nemo-diagnosis-text" style="margin-top:12px;"></div>
+                        </div>
+                        <div id="statisticsMatchedCellsCard" class="benchmark-nemo-table-card">
+                            <div class="benchmark-nemo-card-title">Matched Cells / Site Members</div>
+                            <div id="statisticsMatchedCellsTable" class="benchmark-nemo-table-wrap"></div>
+                        </div>
+                        <div id="statisticsCellHoursCard" class="benchmark-nemo-table-card">
+                            <div class="benchmark-nemo-card-title">Hourly Detail</div>
+                            <div id="statisticsCellHoursTable" class="benchmark-nemo-table-wrap"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <div id="sitePlacementBanner" style="display:none;" class="site-placement-banner">
+                    Click on map to place <strong id="placementSiteNameLabel"></strong>
+                    <span class="site-placement-esc">— Esc to cancel</span>
+                </div>
+                <div id="pairedHorizontalResizer" style="display:none;" aria-hidden="true"></div>
+                <div id="pairedBottomRightHost" style="display:none;">
+                    <div id="pairedPointDetailsHost" style="display:none;"></div>
+                    <div id="pairedBottomStackResizer" style="display:none;" aria-hidden="true"></div>
+                    <div id="pairedLayersHost" style="display:none;"></div>
+                </div>
+
+
+
+                <!-- Bottom Panel for Docked Views (Legacy/Bottom) -->
+                <!-- Bottom Panel for Docked Views (Legacy/Bottom) -->
+                <div id="bottomPanel" class="bottom-panel">
+                    <div id="bottomResizer" class="bottom-resizer">
+                        <div class="bottom-resizer-handle"></div>
+                    </div>
+                    <div id="bottomContent" class="bottom-content">
+                        <!-- Docked Content Will Go Here -->
+                        <div id="dockedChart" class="docked-pane-hidden">
+                        </div>
+                        <div id="dockedSignaling" class="docked-pane-hidden">
+                        </div>
+                        <div id="dockedGrid" class="docked-grid-container">
+                            <div class="docked-item-header docked-grid-header-placeholder">
+                                <!-- Placeholders if needed -->
+                            </div>
+                            <!-- Helper Container for body -->
+                            <div id="dockedGridBody" class="docked-grid-body"></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="distanceDisplay" class="distance-display"></div>
+            </div>
+
+            <div id="mapControls">
+            </div>
+
+            <div id="sidebar" class="hidden">
+                <h3>Point Details</h3>
+                <div id="pointDetails"></div>
+            </div>
+        </main>
+    </div>
+
+    <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script defer src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+    <!-- Signaling Modal -->
+    <!-- Signaling Modal -->
+    <div id="signalingModal" class="modal">
+        <div class="modal-content signaling-modal-content" style="display:flex; flex-direction:column; overflow:hidden;">
+            <div class="modal-header signaling-modal-header" id="signalingModalHeader" style="flex:0 0 auto; position:sticky; top:0; z-index:3; background:#1f2937; cursor:grab;">
+                <div class="signaling-header-left" style="display:flex; align-items:center; gap:20px;">
+                    <h3 id="signalingModalTitle" class="signaling-modal-title">Signaling Data</h3>
+                    <div style="display:flex; align-items:center; gap:15px;">
+                        <input id="signalingSearch" type="text" oninput="filterSignaling()" placeholder="Search message or full decoded text"
+                            class="signaling-filter" aria-label="Signaling Search" style="min-width:320px;" />
+                        <label style="display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:12px; cursor:pointer; user-select:none;">
+                            <input type="checkbox" id="signalingSyncMap" checked style="cursor:pointer;" />
+                            Sync to Map
+                        </label>
+                    </div>
+                </div>
+                <span class="close signaling-close" onclick="closeSignalingModal()">&times;</span>
+            </div>
+            <div id="signalingLinkedSummary" style="padding:6px 18px 0 18px; color:#cbd5e1; font-size:12px;">
+                Select a signaling row to inspect the linked map point.
+            </div>
+            <div id="signalingBody" class="modal-body signaling-modal-body" style="display:flex; flex-direction:column; gap:0; align-items:stretch; flex:1 1 auto; min-height:0; height:auto; overflow:hidden;">
+                <div id="signalingTopPane" style="flex:0 0 58%; min-width:0; min-height:180px; display:flex; flex-direction:column; overflow:auto; padding-right:0;">
+                    <table class="data-table signaling-table">
+                        <thead class="signaling-thead">
+                            <tr>
+                                <th class="th-padding">Time
+                                </th>
+                                <th class="th-padding">Type
+                                </th>
+                                <th class="th-padding">
+                                    Direction</th>
+                                <th class="th-padding">Message
+                                </th>
+                                <th class="th-padding">Flow
+                                </th>
+                                <th class="th-padding">Details</th>
+                                <th class="th-padding" style="width:60px; text-align:center;">Map</th>
+                            </tr>
+                        </thead>
+                        <tbody id="signalingTableBody">
+                            <!-- Data rows -->
+                        </tbody>
+                    </table>
+                </div>
+                <div id="signalingSplitResizer" style="flex:0 0 8px; height:8px; cursor:ns-resize; background:linear-gradient(180deg, rgba(51,65,85,0.15) 0%, rgba(100,116,139,0.45) 50%, rgba(51,65,85,0.15) 100%); border-top:1px solid rgba(148,163,184,0.18); border-bottom:1px solid rgba(148,163,184,0.18);"></div>
+                <div id="signalingSplitDetail" style="flex:1 1 auto; width:auto; min-width:0; max-width:none; min-height:140px; border-top:1px solid rgba(148,163,184,0.18); padding:10px 0 0 0; overflow:auto; align-self:stretch;">
+                    <div id="signalingSelectionSummary" style="color:#94a3b8; font-size:12px; padding-top:8px;">Select a signaling row to inspect the decoded message.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Grid Modal -->
+    <!-- Grid Modal -->
+    <div id="gridModal" class="modal grid-modal-overlay">
+        <div class="modal-content grid-modal-content">
+
+            <!-- Header (Draggable) -->
+            <div class="modal-header grid-modal-header grid-modal-header-custom">
+                <h3 class="grid-title">Grid View
+                </h3>
+                <div class="grid-controls">
+                    <button class="btn btn-sm btn-secondary" onclick="sortGrid()">Sort</button>
+                    <button class="btn btn-sm btn-secondary" onclick="window.exportGridToCSV()">Export CSV</button>
+                    <!-- Dock Button -->
+                    <button class="dock-btn" onclick="toggleGridDock()" title="Dock">&#8595;</button>
+                    <span class="close grid-close"
+                        onclick="document.getElementById('gridModal').style.display='none'">&times;</span>
+                </div>
+            </div>
+
+            <!-- Body -->
+            <div id="gridBody" class="modal-body grid-body grid-modal-body-custom">
+                <!-- Grid Table Generated via JS -->
+                <div class="grid-placeholder">
+                    Drag metrics from the sidebar here to add columns.<br>
+                    (e.g. Serving RSCP, EcNo, SC, etc.)
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dedicated professional benchmark report workspace -->
+    <section id="benchmarkReportWorkspace" aria-label="Benchmark Analysis Report" aria-live="polite">
+        <main class="br-shell" id="benchmarkReportContent"></main>
+    </section>
+
+    <!-- Chart Modal -->
+    <!-- Chart Modal -->
+    <div id="chartModal" class="modal">
+        <div class="modal-content chart-modal-content">
+            <div class="modal-header chart-modal-header">
+                <h3 id="chartTitle" class="chart-title">Chart</h3>
+                <span class="close chart-close" onclick="closeChartModal()">&times;</span>
+            </div>
+            <div class="chart-container">
+                <canvas id="chartCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+
+
+
+
+
+
+    <!-- Floating Info Panel (Draggable) -->
+    <div id="floatingInfoPanel" class="floating-info-panel">
+        <!-- Header (Drag Handle) -->
+        <div id="infoPanelHeader" class="infoPanelHeader info-panel-header">
+            <span class="info-panel-title">Point Details</span>
+            <span onclick="document.getElementById('floatingInfoPanel').style.display='none'"
+                class="info-panel-close">&times;</span>
+        </div>
+        <!-- Content -->
+        <div id="infoPanelContent" class="info-panel-content">
+            <div class="info-panel-placeholder">Select a point to view details</div>
+        </div>
+    </div>
+
+    <!-- SmartCare Sidebar (Right Side) -->
+    <aside id="smartcare-sidebar">
+        <div id="smartcareFloatingHeader" class="smartcare-floating-header">
+            <span>Layers</span>
+        </div>
+        <div class="sidebar-resizer sidebar-resizer-left" data-target="smartcare-sidebar" aria-hidden="true"></div>
+        <div class="sidebar-header">
+            <h3>DT Layers</h3>
+        </div>
+        <div id="dt-layer-list">
+            <!-- DT Layers added dynamically -->
+        </div>
+
+        <div class="sidebar-header">
+            <h3>Site Layers</h3>
+        </div>
+        <div class="global-range-bar">
+            <div class="global-range-label">
+                <span>Range (all)</span>
+                <span id="globalRangeVal">100</span><span>m</span>
+            </div>
+            <input type="range" id="globalRangeSlider" min="10" max="2000" step="10" value="100" class="global-range-input">
+        </div>
+        <div class="bdd-update-bar">
+            <span id="bddStatusText" class="bdd-status-text">BDD: not loaded</span>
+            <label class="bdd-update-btn" title="Import a new BDD spreadsheet file">
+                Update BDD
+                <input type="file" id="bddUpdateInput" accept=".xlsx,.xls,.ods" style="display:none;">
+            </label>
+            <button type="button" class="bdd-update-btn bdd-export-btn" onclick="window.exportAllSites('csv')" title="Export all sites as CSV">⬇ CSV</button>
+            <button type="button" class="bdd-update-btn bdd-export-btn" onclick="window.exportAllSites('xlsx')" title="Export all sites as XLSX">⬇ XLSX</button>
+        </div>
+        <div class="site-search-wrap">
+            <input type="text" id="siteSearchInput" class="site-search-input" placeholder="🔍 Search site…" autocomplete="off">
+            <div id="siteSearchDropdown" class="site-search-dropdown" style="display:none;"></div>
+        </div>
+        <div id="sites-layer-list">
+            <!-- Site Layers added dynamically -->
+        </div>
+
+        <div class="sidebar-header">
+            <h3>SmartCare Layers</h3>
+            <!-- Minimize Button -->
+            <button id="toggleSmartCareSidebar" class="sidebar-toggle-btn" title="Toggle Sidebar">_</button>
+        </div>
+        <div id="smartcare-layer-list">
+            <!-- Items added dynamically -->
+        </div>
+    </aside>
+
+    <script defer src="site_match_utils.js?v=1"></script>
+    <script defer src="map_renderer.js?v=127"></script>
+    <script defer src="cesium_map_adapter.js?v=5"></script>
+    <script defer src="analyze_stats.js?v=2"></script>
+    <script defer src="metric_registry.js?v=7"></script>
+    <script defer src="voice_incident_analyzer.js?v=27"></script>
+    <script defer src="radio_profiles.js?v=4"></script>
+    <script defer src="radio_mos_analyzer.js?v=4"></script>
+    <script defer src="radio_throughput_analyzer.js?v=2"></script>
+    <script defer src="radio_scoring.js?v=3"></script>
+    <script defer src="radio_rca_engine.js?v=8"></script>
+    <script defer src="radio_neighbor_mobility_rca.js?v=2"></script>
+    <script defer src="radio_scan_fusion.js?v=1"></script>
+    <script defer src="radio_degradation_analyzer.js?v=22"></script>
+    <script defer src="radio_professional_report.js?v=9"></script>
+    <script defer src="parser.js?v=119"></script>
+    <script defer src="lte_ho_analysis.js?v=6"></script>
+    <script defer src="route_scan_analyzer.js?v=9"></script>
+    <script defer src="bdd_matcher.js?v=1"></script>
+    <script defer src="radio_optim_analysis.js?v=6"></script>
+    <!-- KML Export Choice Modal -->
+    <!-- KML Export Choice Modal -->
+    <div id="exportKmlModal" class="modal modal-centered">
+        <div class="modal-content glass-modal-content">
+            <div class="modal-header glass-modal-header">
+                <h3>Export KML</h3>
+                <span class="close"
+                    onclick="document.getElementById('exportKmlModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body">
+                <p class="modal-subtext modal-subtext-clean">Choose what you want to export:</p>
+                <div class="glass-btn-group">
+                    <button id="btnExportCurrentView" class="btn">Current View</button>
+                    <button id="btnExportAllSites" class="btn">All Sites</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import Choice Modal -->
+    <!-- Import Choice Modal -->
+    <div id="importModal" class="modal modal-centered">
+        <div class="modal-content glass-modal-content">
+            <div class="modal-header glass-modal-header">
+                <h3>Import Data</h3>
+                <span class="close" onclick="document.getElementById('importModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body">
+                <p class="modal-subtext modal-subtext-clean">Choose what you want to import:</p>
+                <div class="glass-btn-group">
+                    <button id="btnImportSites" class="btn">Sites (Excel/CSV)</button>
+                    <button id="btnImportLog" class="btn">DT File (CSV/XLSX/TXT/KML)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- LITE: benchmark / statistics / LOS / RF panels and modules removed -->
+    <!-- LITE flag (must load before app.js) -->
+    <script>
+    window.COP_LITE = true;
+    // COP LITE allowlist: Coverage RSRP/RSCP/RxLev, Quality SINR/EcNo/RxQual/RSRQ,
+    // any MOS column, DL+UL Throughput. Everything else is hidden in the sidebar.
+    window.__copLiteMetricAllowed = function (text) {
+      var s = String(text || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (!s) return false;
+      if (s.indexOf("polqa") !== -1 || s.indexOf("pesq") !== -1 || s.indexOf("audioqualitymos") !== -1) return true;
+      if (s === "mos" || s === "mosdl" || s.indexOf("mos") !== -1) return true;
+      if (s.indexOf("anchor") !== -1) return false;
+      if (s.indexOf("mac") !== -1 || s.indexOf("pdsch") !== -1 || s.indexOf("pusch") !== -1 || s.indexOf("pdcch") !== -1) return false;
+      if (s.indexOf("apprate") !== -1) return true;
+      if (s.indexOf("throughput") !== -1) return true;
+      if (s.indexOf("ssrsrp") !== -1 || s.indexOf("rsrp") !== -1) return true;
+      if (s.indexOf("rscp") !== -1) return true;
+      if (s.indexOf("rxlev") !== -1 || s.indexOf("rxlevel") !== -1) return true;
+      if (s.indexOf("sssinr") !== -1 || s.indexOf("rssinr") !== -1 || s.indexOf("sinr") !== -1 || s.indexOf("cinr") !== -1) return true;
+      if (s.indexOf("ecno") !== -1) return true;
+      if (s.indexOf("rxqual") !== -1) return true;
+      if (s.indexOf("ssrsrq") !== -1 || s.indexOf("rsrq") !== -1) return true;
+      if (s === "level" || s.indexOf("signallevel") !== -1) return true;
+      if (s === "quality") return true;
+      return false;
+    };
+    // Remove empty sidebar group headers left behind by the allowlist filter.
+    window.__copLiteCleanupActions = function (actionsEl) {
+      if (!actionsEl || !actionsEl.children) return;
+      var kids = Array.prototype.slice.call(actionsEl.children);
+      var headers = [];
+      kids.forEach(function (el, i) {
+        if (el.classList && el.classList.contains("log-group-header")) headers.push({ el: el, idx: i });
+      });
+      headers.forEach(function (h, hi) {
+        var start = kids.indexOf(h.el);
+        var end = (hi + 1 < headers.length) ? kids.indexOf(headers[hi + 1].el) : kids.length;
+        var hasItem = false;
+        for (var k = start + 1; k < end; k++) {
+          var sib = kids[k];
+          if (sib && sib.nodeType === 1 && sib.classList && sib.classList.contains("param-item")) { hasItem = true; break; }
+          if (sib && sib.nodeType === 1 && sib.querySelector && sib.querySelector(".param-item")) { hasItem = true; break; }
+        }
+        if (!hasItem) h.el.style.display = "none";
+      });
+      // Hide collapsible sub-panels (▶ ...) whose body has no visible metric left.
+      var wraps = actionsEl.querySelectorAll ? actionsEl.querySelectorAll("div") : [];
+      for (var w = 0; w < wraps.length; w++) {
+        var wrap = wraps[w];
+        var body = null, head = null;
+        for (var c = 0; c < wrap.children.length; c++) {
+          var ch = wrap.children[c];
+          if (ch.style && (ch.style.display === "none" || ch.style.display === "flex") && ch.style.flexDirection === "column") body = ch;
+          if (ch.innerHTML && ch.innerHTML.indexOf("▶") === 0) head = ch;
+        }
+        if (body && head && !body.querySelector(".param-item")) wrap.style.display = "none";
+      }
+    };
+    </script>
+    <!-- Scripts -->
+    <script defer src="benchmark_nemo_ranking_state.js?v=2"></script>
+    <script defer src="benchmark_nemo_scorecard_state.js?v=2"></script>
+    <script defer src="benchmark_nemo_macro_state.js?v=10"></script>
+    <script defer src="benchmark_nemo_ui_state.js?v=1"></script>
+    <script defer src="theme_v2.js?v=v597"></script>
+    <script defer src="window_manager.js?v=3"></script>
+    <script defer src="app.js?v=v892"></script>
+    <script defer src="radio_dt_cop_export.js?v=13"></script>
+    <script defer src="radio_degradation_ui.js?v=24"></script>
+    <!-- User Point Modal -->
+    <div id="userPointModal" class="modal">
+        <div class="modal-content user-point-modal-content">
+            <div class="modal-header user-point-modal-header">
+                <h3>Add User Point</h3>
+                <span class="close"
+                    onclick="document.getElementById('userPointModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body user-point-modal-body">
+                <div class="up-input-group">
+                    <label class="up-label" for="upName">Name</label>
+                    <input type="text" id="upName" placeholder="Point Name" class="up-input">
+                </div>
+                <div class="up-input-row">
+                    <div class="up-input-item">
+                        <label class="up-label" for="upLat">Latitude</label>
+                        <input type="number" id="upLat" placeholder="33.xxx" step="any" class="up-input">
+                    </div>
+                    <div class="up-input-item">
+                        <label class="up-label" for="upLng">Longitude</label>
+                        <input type="number" id="upLng" placeholder="-7.xxx" step="any" class="up-input">
+                    </div>
+                </div>
+                <div class="up-footer">
+                    <button id="submitUserPoint" class="btn up-submit-btn">Add to Map</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Site Editor Modal (Draggable) -->
+    <!-- Quick-place: enter site name then click map -->
+    <div id="addSiteQuickModal" class="modal">
+        <div class="modal-content glass-modal-content quick-place-modal" id="addSiteQuickContent">
+            <div class="modal-header glass-modal-header" id="addSiteQuickHeader">
+                <h3>📍 Add Site</h3>
+                <span class="close" onclick="document.getElementById('addSiteQuickModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body">
+                <div class="form-group">
+                    <label for="quickSiteName">Site Name</label>
+                    <input type="text" id="quickSiteName" class="form-control" placeholder="e.g. SITE_001">
+                </div>
+                <p class="form-hint">Creates 3 sectors (0°, 120°, 240°) for 2G, 3G and 4G at the clicked location.</p>
+                <div class="editor-footer" style="margin-top:14px;">
+                    <button class="btn" onclick="document.getElementById('addSiteQuickModal').style.display='none'">Cancel</button>
+                    <button class="btn btn-green" onclick="window.startSitePlacement()">Place on Map →</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Comprehensive site editor (manual table + xlsx/csv import) -->
+    <div id="customSiteEditorModal" class="modal">
+        <div class="modal-content glass-modal-content site-editor-size" id="customSiteEditorContent">
+            <div class="modal-header glass-modal-header" id="customSiteEditorHeader">
+                <h3 id="customSiteEditorTitle">Edit Site</h3>
+                <span class="close" onclick="document.getElementById('customSiteEditorModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body">
+                <div class="site-edit-tabs">
+                    <button class="site-edit-tab active" id="tabManual" onclick="window.showSiteEditTab('manual')">Manual</button>
+                    <button class="site-edit-tab" id="tabImport" onclick="window.showSiteEditTab('import')">Import xlsx / ods / csv</button>
+                </div>
+
+                <div id="siteEditManualPane">
+                    <div class="site-edit-table-wrap">
+                        <table class="site-edit-table">
+                            <thead>
+                                <tr>
+                                    <th rowspan="2">Sector</th>
+                                    <th rowspan="2">Az&nbsp;(°)</th>
+                                    <th colspan="4" class="se-tech-head se-th-2g">2G</th>
+                                    <th colspan="4" class="se-tech-head se-th-3g">3G</th>
+                                    <th colspan="4" class="se-tech-head se-th-4g">4G</th>
+                                </tr>
+                                <tr>
+                                    <th>Cell Name</th><th>Cell ID</th><th>PCI/SC</th><th>Freq</th>
+                                    <th>Cell Name</th><th>Cell ID</th><th>PCI/SC</th><th>Freq</th>
+                                    <th>Cell Name</th><th>Cell ID</th><th>PCI/SC</th><th>Freq</th>
+                                </tr>
+                            </thead>
+                            <tbody id="siteEditTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="siteEditImportPane" style="display:none;">
+                    <p class="form-hint" style="margin-bottom:10px;">
+                        Supported columns (case-insensitive):
+                        <code>tech, azimuth, cell_name, cell_id, pci, sc, freq</code>
+                    </p>
+                    <div class="form-group">
+                        <label for="siteImportFile">xlsx / ods / csv file</label>
+                        <input type="file" id="siteImportFile" accept=".csv,.xlsx,.xls,.ods,.kml" class="form-control">
+                    </div>
+                    <div id="siteImportPreview"></div>
+                </div>
+
+                <div class="editor-footer" style="margin-top:14px;">
+                    <button class="btn" onclick="document.getElementById('customSiteEditorModal').style.display='none'">Close</button>
+                    <button class="btn btn-green" onclick="window.saveCustomSite()">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="siteEditorModal" class="modal">
+        <!-- Added .site-editor-size to strictly keep it wider -->
+        <div class="modal-content glass-modal-content site-editor-size">
+            <div class="modal-header glass-modal-header site-editor-modal-header">
+                <h3 id="siteEditorTitle">Edit Sector</h3>
+                <span class="close"
+                    onclick="document.getElementById('siteEditorModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body site-editor-body">
+                <input type="hidden" id="editOriginalId">
+                <input type="hidden" id="editOriginalIndex">
+                <input type="hidden" id="editLayerId">
+
+                <div class="modal-section-title">Site Information</div>
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editSiteName">Site Name</label>
+                        <input type="text" id="editSiteName" class="form-control" placeholder="e.g. Site A">
+                    </div>
+                    <div class="form-group">
+                        <label for="editCellName">Cell Name (Base)</label>
+                        <input type="text" id="editCellName" class="form-control" placeholder="e.g. SiteA_1">
+                    </div>
+                </div>
+
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editLat">Latitude</label>
+                        <input type="number" step="any" id="editLat" class="form-control" placeholder="33.xxxxx">
+                    </div>
+                    <div class="form-group">
+                        <label for="editLng">Longitude</label>
+                        <input type="number" step="any" id="editLng" class="form-control" placeholder="-7.xxxxx">
+                    </div>
+                </div>
+
+                <div class="modal-section-title">Sector Details</div>
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editCellId">Cell ID (Base)</label>
+                        <input type="text" id="editCellId" class="form-control" placeholder="e.g. 1001">
+                    </div>
+                    <div class="form-group">
+                        <label for="editPci">PCI / SC (Start)</label>
+                        <input type="number" id="editPci" class="form-control" placeholder="e.g. 50">
+                    </div>
+                </div>
+
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editAzimuth">Azimuth (1st Sector)</label>
+                        <input type="number" id="editAzimuth" class="form-control" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="editTech">Technology</label>
+                        <select id="editTech" class="form-control">
+                            <option value="4G">4G / LTE</option>
+                            <option value="3G">3G / UMTS</option>
+                            <option value="2G">2G / GSM</option>
+                            <option value="5G">5G / NR</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editBeamwidth">Beamwidth</label>
+                        <input type="number" id="editBeamwidth" class="form-control" placeholder="65" value="65">
+                    </div>
+                </div>
+
+                <div class="editor-footer">
+                    <button class="btn btn-red" id="btnDeleteSector"
+                        onclick="window.deleteSectorCurrent()">Delete</button>
+                    <button class="btn btn-blue mr-2" id="btnAddSiblingSector"
+                        onclick="window.addSectorToCurrentSite()">+ Add Sector</button>
+                    <button class="btn btn-green" onclick="window.saveSector()">Save Site</button>
+                </div>
+            </div>
+        </div>
+        </div>
+    </div>
+
+    <!-- Import Progress Modal -->
+    <div id="importProgressModal" class="progress-modal">
+        <div class="progress-modal-content">
+            <div class="progress-glow-orb progress-glow-orb-a"></div>
+            <div class="progress-glow-orb progress-glow-orb-b"></div>
+            <div class="modal-header progress-modal-header">
+                <div class="progress-header-copy">
+                    <div class="progress-eyebrow">Upload in progress</div>
+                    <h3 id="progressTitle">Importing Data...</h3>
+                    <div class="progress-file-row">
+                        <div id="progressFileName" class="progress-file-name">Waiting for file…</div>
+                        <div id="progressFileType" class="progress-file-type-badge">FILE</div>
+                    </div>
+                </div>
+                <div id="progressStage" class="progress-stage-pill">Preparing</div>
+            </div>
+            <div class="modal-body progress-modal-body">
+                <div class="progress-hero">
+                    <div id="progressHeroIcon" class="progress-hero-icon">⬆</div>
+                    <div class="progress-hero-copy">
+                        <div class="progress-hero-title">Processing your file</div>
+                        <div id="progressDetail" class="progress-detail">Initializing parser...</div>
+                    </div>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar-sheen"></div>
+                    <div id="importProgressBar" class="progress-bar-fill"></div>
+                </div>
+                <div class="progress-meta-row">
+                    <div id="progressText" class="progress-percentage">0%</div>
+                    <div class="progress-meta-caption">Please keep this window open</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="localAiModal" class="local-ai-modal-overlay" style="display:none;">
+        <div class="local-ai-modal">
+            <div class="local-ai-modal-header">
+                <div>
+                    <div class="local-ai-eyebrow">Local telecom AI</div>
+                    <h3 id="localAiModalTitle">Local AI Analysis</h3>
+                    <div class="local-ai-subtitle" id="localAiModalSubtitle">All logfile data stays on your Mac and is sent only to your local AI server.</div>
+                </div>
+                <button id="localAiCloseBtn" class="local-ai-close-btn" aria-label="Close Local AI panel">&times;</button>
+            </div>
+            <div class="local-ai-modal-body">
+                <div class="local-ai-control-panel">
+                    <div class="local-ai-status-grid">
+                        <div class="local-ai-status-card">
+                            <div class="local-ai-status-label" id="localAiBackendLabel">Local AI</div>
+                            <div id="localAiHealthBadge" class="local-ai-status-badge is-pending">Checking…</div>
+                            <div id="localAiHealthText" class="local-ai-status-text">Waiting for health check.</div>
+                        </div>
+                        <div class="local-ai-status-card">
+                            <div class="local-ai-status-label">Configured Model</div>
+                            <div id="localAiModelBadge" class="local-ai-status-badge is-pending">Checking…</div>
+                            <div id="localAiModelText" class="local-ai-status-text">Waiting for model check.</div>
+                        </div>
+                    </div>
+                    <form id="localAiUploadForm" class="local-ai-upload-form">
+                        <label class="local-ai-file-label" for="localAiFileInput">Plain-text logfile</label>
+                        <input type="file" id="localAiFileInput" accept=".txt,.log,.nmf,.csv" class="local-ai-file-input" hidden>
+                        <div id="localAiSelectedFile" class="local-ai-selected-file">No file selected. You can also analyze the log already loaded in the app.</div>
+                        <div class="local-ai-source-help">Direct upload supports plain-text files. For imported `.xlsx` logs, use the loaded-log button below.</div>
+                        <div class="local-ai-form-actions">
+                            <button type="button" id="localAiChooseFileBtn" class="btn header-btn">Choose File</button>
+                            <button type="button" id="localAiUseLoadedBtn" class="btn header-btn">Use Loaded Log</button>
+                            <button type="button" id="localAiRefreshBtn" class="btn header-btn">Refresh Status</button>
+                            <button type="submit" id="localAiAnalyzeBtn" class="btn header-btn local-ai-run-btn" disabled>Analyze Locally</button>
+                        </div>
+                    </form>
+                    <div class="local-ai-progress-block">
+                        <div class="local-ai-progress-topline">
+                            <div id="localAiProgressText">Idle</div>
+                            <div id="localAiProgressValue">0%</div>
+                        </div>
+                        <div class="local-ai-progress-bar">
+                            <div id="localAiProgressBar" class="local-ai-progress-fill"></div>
+                        </div>
+                        <div id="localAiErrorBox" class="local-ai-error-box" hidden></div>
+                    </div>
+                </div>
+                <div id="localAiResults" class="local-ai-results-panel">
+                    <div class="local-ai-results-empty">
+                        Upload a logfile to get chunk-level telecom troubleshooting with local Gemma 4 analysis.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+<!-- LOS Simulator panel — button is in the header toolbar -->
+<div id="los-panel">
+  <div id="los-panel-header">
+    📡 Line-of-Sight Simulator
+    <div style="display:flex;gap:4px;align-items:center">
+      <button id="los-panel-collapse" title="Hide/show controls" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:13px;padding:2px 5px;line-height:1">▲</button>
+      <button id="los-panel-close" title="Close">✕</button>
+    </div>
+  </div>
+
+  <!-- TOP PANE: fields + actions + results (resizable) -->
+  <div id="los-top-pane">
+    <div id="los-instructions">
+      <strong>Step 1</strong> — click <em>Set Observer</em>, then click the map.<br>
+      <strong>Step 2</strong> — click <em>Set Target</em>, then click the map.
+    </div>
+
+    <div class="los-field-group">
+      <div class="los-field-row">
+        <label>Selected observer AGL (m)</label>
+        <input type="number" id="los-obs-agl" value="25" min="0" max="500" step="0.5">
+      </div>
+      <div class="los-field-row">
+        <label>Selected observer</label>
+        <span class="los-coord-display" id="los-obs-coord">— click map —</span>
+      </div>
+      <div class="los-field-row">
+        <label>Target AGL (m)</label>
+        <input type="number" id="los-tgt-agl" value="1.5" min="0" max="500" step="0.5">
+      </div>
+      <div class="los-field-row">
+        <label>Target pos</label>
+        <span class="los-coord-display" id="los-tgt-coord">— click map —</span>
+      </div>
+      <div class="los-field-row">
+        <label>Frequency (MHz)</label>
+        <input type="number" id="los-freq" value="1800" min="400" max="4000" step="1">
+      </div>
+      <div class="los-field-row">
+        <label>Sample spacing (m)</label>
+        <input type="number" id="los-spacing" value="2" min="0.5" max="50" step="0.5">
+      </div>
+      <div class="los-field-row" style="align-items:flex-start">
+        <label>Terrain sample</label>
+        <div style="display:flex;flex-direction:column;gap:4px;min-width:0;flex:1;">
+          <span class="los-coord-display" id="los-sample-coord">— click Inspect, then map —</span>
+          <span class="los-coord-display" id="los-sample-value" style="white-space:normal;line-height:1.35;">Ground: —</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="los-actions">
+      <button class="los-btn los-btn--secondary" id="los-btn-sample">🧭 Inspect</button>
+      <button class="los-btn los-btn--secondary" id="los-btn-sample-line">📈 Inspect Line</button>
+      <button class="los-btn los-btn--secondary" id="los-btn-observer">📍 Add Observer</button>
+      <button class="los-btn los-btn--secondary" id="los-btn-clear-observers">🗑 Clear Obs</button>
+      <button class="los-btn los-btn--secondary" id="los-btn-target">🎯 Target</button>
+      <button class="los-btn los-btn--primary"   id="los-btn-compute">Compute LOS</button>
+      <button class="los-btn los-btn--viewshed"  id="los-btn-viewshed" title="Radial visibility sweep from observer">👁 Viewshed</button>
+      <div class="los-spinner" id="los-spinner"></div>
+    </div>
+
+    <div id="los-observers-wrap" style="padding:8px 14px 6px;border-top:1px solid rgba(30,58,95,0.55);">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="font-size:11px;font-weight:700;letter-spacing:0.08em;color:#93c5fd;text-transform:uppercase;">Observers</span>
+        <span id="los-observers-summary" style="font-size:11px;color:#94a3b8;">No observers yet</span>
+      </div>
+      <div id="los-observers-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+    </div>
+
+    <!-- Viewshed options (shown when viewshed is active) -->
+    <div id="los-viewshed-opts" style="display:none">
+      <div class="los-field-group" style="border-top:1px solid #1e3a5f;padding:6px 14px;">
+        <div class="los-field-row">
+          <label>Max radius (m)</label>
+          <input type="number" id="los-vs-radius" value="1000" min="100" max="5000" step="100">
+        </div>
+        <div class="los-field-row">
+          <label>Az step (°)</label>
+          <input type="number" id="los-vs-az" value="2" min="0.5" max="10" step="0.5">
+        </div>
+      </div>
+    </div>
+
+    <div id="los-result">
+      <div id="los-badge"></div>
+      <div class="los-stat-grid" id="los-stats"></div>
+    </div>
+  </div>
+
+  <!-- MAP OVERLAY TOGGLES (control what's shown on the main map) -->
+  <div id="los-layer-bar">
+    <button id="los-btn-compute-bar" class="los-layer-btn los-layer-btn--compute" title="Compute Line of Sight">⚡ Calc LOS</button>
+    <span class="los-layer-sep"></span>
+    <span style="font-size:10px;color:#64748b;align-self:center;margin-right:2px">Map:</span>
+    <button class="los-layer-btn los-layer-btn--active" id="los-toggle-buildings"  title="Toggle buildings on main map">🏢 Bldgs</button>
+    <button class="los-layer-btn los-layer-btn--active" id="los-toggle-vegetation" title="Toggle vegetation on main map">🌳 Veg</button>
+    <button class="los-layer-btn"                       id="los-toggle-viewshed"   title="Toggle viewshed layer" style="display:none">👁 Viewshed</button>
+    <button class="los-layer-btn los-layer-btn--clear"  id="los-btn-clear-viewshed" title="Remove viewshed" style="display:none">✕ Clear</button>
+  </div>
+
+  <!-- CUSTOM OBSTACLES SECTION -->
+  <div id="los-obs-section">
+    <div id="los-obs-header">
+      <span class="los-obs-section-label">Custom Obstacles</span>
+      <div style="display:flex;gap:4px">
+        <button id="los-obs-draw-btn"   class="los-layer-btn" title="Draw obstacle polygon on map">✏️ Draw</button>
+        <button id="los-obs-import-btn" class="los-layer-btn" title="Import from GeoJSON file">📂</button>
+        <button id="los-obs-export-btn" class="los-layer-btn" title="Export as GeoJSON">💾</button>
+      </div>
+    </div>
+    <div id="los-obs-instructions"></div>
+    <!-- Property form (shown after drawing a polygon) -->
+    <div id="los-obs-form" style="display:none">
+      <div class="los-obs-form-row">
+        <label>Name</label>
+        <input type="text" id="los-obs-form-name" placeholder="e.g. Building A">
+      </div>
+      <div class="los-obs-form-row">
+        <label>Type</label>
+        <select id="los-obs-form-type">
+          <option value="building">Building</option>
+          <option value="vegetation">Vegetation</option>
+        </select>
+      </div>
+      <div class="los-obs-form-row">
+        <label>Height AGL (m)</label>
+        <input type="number" id="los-obs-form-height" value="10" min="0.5" max="500" step="0.5">
+      </div>
+      <div class="los-obs-form-btns">
+        <button id="los-obs-form-confirm" class="los-obs-confirm">✓ Add</button>
+        <button id="los-obs-form-cancel"  class="los-obs-cancel">Cancel</button>
+      </div>
+    </div>
+    <!-- Obstacle list -->
+    <div id="los-obs-list"></div>
+  </div>
+
+  <!-- RESIZE HANDLE: between obstacles and profile -->
+  <div class="los-section-handle" title="Drag to resize elevation profile"></div>
+
+  <!-- PROFILE PANE -->
+  <div id="los-profile-wrap" style="display:none">
+    <div id="los-profile-title">Elevation Profile</div>
+    <canvas id="los-profile-canvas" style="width:100%;height:100%;display:block;"></canvas>
+  </div>
+</div>
+
+    <!-- LITE: LOS / RF modules removed -->
+</body>
+
+</html>

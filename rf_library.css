@@ -1,0 +1,126 @@
+/* RF panel hierarchy: it must remain above the map and stay usable while
+   scrolling long RF workflows. */
+.rf-panel {
+  /* Above the map, floating map windows and the regular application panels. */
+  z-index: 2147483001;
+  isolation: isolate;
+}
+
+/* This is a child workflow panel (pixel inspection) and must stay usable
+   when it overlaps the main RF configuration window. */
+.rf-details-panel { z-index: 2147483002; }
+
+.rf-panel .rf-head {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin: 0;
+  box-shadow: 0 9px 18px rgba(2, 8, 23, .42);
+}
+
+.rf-panel .rf-step-collapsible > h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.rf-panel .rf-step-collapsible > h3::after {
+  content: "⌃";
+  flex: 0 0 auto;
+  color: #7dd3fc;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.rf-panel .rf-step-collapsible > h3:hover::after,
+.rf-panel .rf-step-collapsible > h3:focus-visible::after {
+  color: #e0f2fe;
+}
+
+.rf-panel .rf-step-collapsible > h3:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 4px;
+  border-radius: 5px;
+}
+
+.rf-panel .rf-step-collapsible.rf-step-collapsed > h3::after { content: "⌄"; }
+.rf-panel .rf-step-collapsible.rf-step-collapsed > :not(h3) { display: none !important; }
+
+/* RF library controls: persistent simulation visibility and rename. */
+.rf-library {
+  max-height: 210px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.rf-library-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 32px;
+  align-items: stretch;
+  gap: 6px;
+  width: auto;
+  margin: 6px 0;
+  padding: 7px;
+  border: 1px solid #1f3b56;
+  background: #0a1729;
+  border-radius: 9px;
+  text-align: initial;
+  cursor: default;
+}
+
+.rf-library-row:hover { border-color: #38bdf8; }
+.rf-library-row small { display: block; margin-top: 2px; color: #8ba3bd; font-size: 11px; }
+
+.rf-library-visibility {
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.rf-library-visibility input {
+  width: 16px;
+  height: 16px;
+  accent-color: #38bdf8;
+  cursor: pointer;
+}
+
+.rf-library-visibility span { color: #64748b; font-size: 14px; }
+.rf-library-row.ready .rf-library-visibility span { color: #22c55e; }
+
+.rf-library-open {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #dbeafe;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rf-library-open b {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.rf-library-open:hover b { color: #7dd3fc; }
+
+.rf-library-rename {
+  align-self: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #315477;
+  border-radius: 7px;
+  background: #12233a;
+  color: #93c5fd;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.rf-library-rename:hover { border-color: #38bdf8; color: #e0f2fe; }

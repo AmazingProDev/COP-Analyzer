@@ -1,0 +1,9 @@
+/* Guided manual polygon selection for RF selected-site simulations. */
+.rf-manual-aoi{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 16px;padding:10px 11px;border:1px solid #1e6d91;border-radius:10px;background:linear-gradient(135deg,#082a42,#101c34);color:#dff5ff}
+.rf-manual-aoi b{display:block;color:#7dd3fc;font-size:12px}
+.rf-manual-aoi small{display:block;margin-top:3px;color:#a8c8de;font-size:10px;line-height:1.35}
+.rf-manual-aoi-actions{display:flex;flex:none;gap:6px}
+.rf-manual-aoi-actions button{border:1px solid #2382aa;border-radius:7px;background:#0c4563;color:#e0f8ff;padding:7px 8px;font-size:11px;font-weight:800;cursor:pointer}
+.rf-manual-aoi-actions button:hover{border-color:#67e8f9;background:#075b7f}
+.rf-manual-aoi-actions button:disabled{opacity:.5;cursor:not-allowed}
+@media(max-width:600px){.rf-manual-aoi{align-items:flex-start;flex-direction:column}.rf-manual-aoi-actions{width:100%}.rf-manual-aoi-actions button{flex:1}}
