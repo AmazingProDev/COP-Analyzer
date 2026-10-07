@@ -104,7 +104,7 @@
       summary = `La dégradation de qualité SINR sur ${name} coïncide avec un problème de ${pollution} sur ${optim.overlapPct} % de la zone.`;
       if (optim.polluters.length) summary += ` Top 3 contributeurs non-serving mesurés : ${optim.polluters.map(cellLabel).join(" ; ")}.`;
       if (plannedName) {
-        summary += `\nActions recommandées :\n${optim.summaryActions.map((action, i) => `${i + 1}- ${action}`).join("\n")}`;
+        summary += `\nActions recommandées :\n${optim.summaryActions.join("\n")}`;
       }
     }
     optim.executiveSummary = summary;
@@ -134,6 +134,192 @@
       `Limites : les mesures DT servent aux deux moteurs et ne sont pas des preuves indépendantes. Les temps sans mesure sont exclus du dwell (${dwell.omittedGaps} coupure(s)). ${optim.rat === "NR" ? "La comparaison NR exige les mêmes références de mesure et de fréquence. " : ""}${status}`,
     ].join("\n\n");
     return optim;
+  }
+
+  // Multi-server overlap (expert rule): a short degraded run served by
+  // several cells at comparable levels, with a measured same-channel
+  // neighbor at the same level. Works LTE + NR from measured samples only;
+  // BDD geometry (keeper vs interferers + named action) is added in enrich().
+  const OVERLAP = {
+    maxServingSpreadDb: 6,
+    neighborWithinDb: 6,
+    minDegradedSamples: 2,
+    interfererDistRatio: 2,
+    thinSampleCap: 5,
+  };
+
+  function overlapServingOf(sample) {
+    const serving = sample.serving || sample;
+    return {
+      pci: finite(serving.pci),
+      channel: finite(serving.earfcn ?? serving.nrarfcn ?? serving.channel ?? serving.freq),
+      rsrp: finite(serving.rsrp),
+      cellName: serving.cellName || null,
+    };
+  }
+
+  function overlapMeasuredNeighbors(sample, servingChannel, rat) {
+    const out = [];
+    const push = (pci, rsrp, channel, cellName) => {
+      const p = finite(pci), r = finite(rsrp), c = finite(channel);
+      if (p === null || r === null || c === null) return;
+      if (c !== servingChannel) return;
+      out.push({ pci: p, rsrp: r, channel: c, cellName: cellName || null });
+    };
+    // Deep-analysis path: strongCells carry measured non-serving cells.
+    if (Array.isArray(sample.strongCells)) {
+      for (const cell of sample.strongCells) {
+        if (!cell || cell.role === "serving") continue;
+        push(cell.pci, cell.rsrp, cell.channel ?? cell.earfcn ?? cell.nrarfcn ?? servingChannel, cell.cellName);
+      }
+    }
+    // Canonical path: parsed measured neighbors on the point snapshot.
+    const raws = sample.point?.parsed?.neighbors || sample.parsed?.neighbors || [];
+    for (const raw of (Array.isArray(raws) ? raws : [])) {
+      if (!raw || typeof raw !== "object") continue;
+      const rawRat = String(raw.rat || "").toUpperCase();
+      if (rawRat && ((rat === "NR") !== (rawRat === "NR"))) continue;
+      const kind = String(raw.source_kind ?? raw.sourceKind ?? raw.role ?? raw.type ?? "");
+      if (/inferred|estimated|synthetic|secondary[_\s-]*serving|scell|anchor/i.test(kind)) continue;
+      push(raw.pci ?? raw.sc, raw.rsrp ?? raw.rscp,
+        rat === "NR" ? (raw.nrarfcn ?? raw.freq ?? raw.channel) : (raw.earfcn ?? raw.freq ?? raw.channel),
+        raw.cellName ?? raw.name ?? null);
+    }
+    const dedup = new Map();
+    for (const entry of out) {
+      const key = `${entry.pci}|${entry.channel}`;
+      const prev = dedup.get(key);
+      if (!prev || entry.rsrp > prev.rsrp) dedup.set(key, entry);
+    }
+    return [...dedup.values()];
+  }
+
+  function overlapFor(incident, samples, rat) {
+    const none = { applies: false };
+    const usable = (Array.isArray(samples) ? samples : []).map((s) => {
+      const serving = overlapServingOf(s);
+      return { sample: s, serving };
+    }).filter((row) => row.serving.pci !== null && row.serving.rsrp !== null && row.serving.channel !== null);
+    if (usable.length < OVERLAP.minDegradedSamples) return none;
+    const byPci = new Map();
+    for (const row of usable) {
+      const entry = byPci.get(row.serving.pci) || { pci: row.serving.pci, cellName: row.serving.cellName, samples: 0, rsrpSum: 0 };
+      entry.samples++;
+      entry.rsrpSum += row.serving.rsrp;
+      if (!entry.cellName && row.serving.cellName) entry.cellName = row.serving.cellName;
+      byPci.set(row.serving.pci, entry);
+    }
+    if (byPci.size < 2) return none;
+    const servingCells = [...byPci.values()].map((entry) => ({
+      pci: entry.pci, cellName: entry.cellName, samples: entry.samples,
+      rsrpMean: Math.round((entry.rsrpSum / entry.samples) * 10) / 10,
+    })).sort((a, b) => b.rsrpMean - a.rsrpMean);
+    const spreadDb = Math.round((servingCells[0].rsrpMean - servingCells[servingCells.length - 1].rsrpMean) * 10) / 10;
+    if (!(spreadDb <= OVERLAP.maxServingSpreadDb)) return none;
+    const bestServing = servingCells[0].rsrpMean;
+    let neighbor = null;
+    for (const row of usable) {
+      const servingPcis = new Set(servingCells.map((cell) => cell.pci));
+      for (const cand of overlapMeasuredNeighbors(row.sample, row.serving.channel, rat)) {
+        if (servingPcis.has(cand.pci)) continue;
+        const delta = Math.round((bestServing - cand.rsrp) * 10) / 10;
+        if (delta <= OVERLAP.neighborWithinDb && (!neighbor || delta < neighbor.deltaDb)) {
+          neighbor = { pci: cand.pci, cellName: cand.cellName, rsrp: cand.rsrp, deltaDb: delta };
+        }
+      }
+    }
+    const thin = usable.length <= OVERLAP.thinSampleCap;
+    return {
+      applies: true, rat, channel: usable[0].serving.channel,
+      sampleCount: usable.length, servingCells, spreadDb, neighbor,
+      keeperPci: null, interferers: [],
+      confidence: "medium",
+      directional: thin,
+      action: thin
+        ? `Recouvrement multi-serveurs (${usable.length} snapshots — directionnel) entre ${servingCells.map((c) => `PCI ${c.pci}`).join(", ")} à niveaux comparables (${spreadDb} dB)${neighbor ? ` ; voisine PCI ${neighbor.pci} au même niveau` : ""} : équilibrer tilt/azimut/puissance pour dégager une serveuse dominante ; confirmer la géométrie BDD.`
+        : `Recouvrement multi-serveurs entre ${servingCells.map((c) => `PCI ${c.pci}`).join(", ")} à niveaux comparables (${spreadDb} dB)${neighbor ? ` ; voisine PCI ${neighbor.pci} au même niveau` : ""} : équilibrer tilt/azimut/puissance pour dégager une serveuse dominante ; confirmer la géométrie BDD.`,
+    };
+  }
+
+  function overlapRefineWithBdd(optim) {
+    const overlap = optim && optim.overlap;
+    if (!overlap || !overlap.applies) return;
+    const ranked = optim.planned && optim.planned.ok && Array.isArray(optim.planned.rankedCandidates)
+      ? optim.planned.rankedCandidates : [];
+    overlapApplyDistances(overlap,
+      new Map(ranked.map((row) => [Number(row.pci), { distM: row.distM, cellName: row.cellName }])));
+  }
+
+  // Local refinement for overlaps without Deep Analysis (short runs rarely
+  // have scan zones): nearest BDD candidate per PCI straight from the loaded
+  // sectors, no planned classification involved.
+  function overlapRefineLocal(optim, sectors, bdd) {
+    const overlap = optim && optim.overlap;
+    if (!overlap || !overlap.applies || overlap.keeperPci !== null) return;
+    if (!bdd || !Array.isArray(sectors) || !sectors.length) return;
+    const rat = overlap.rat, channel = overlap.channel;
+    const cells = sectors.map((s) => {
+      const ratText = String(s.rat || s.tech || "").toUpperCase();
+      return {
+        rat: /5G|\bNR\b/.test(ratText) ? "NR" : (/LTE|4G|E-UTRA/.test(ratText) ? "LTE" : null),
+        pci: finite(s.pci ?? s.sc), earfcn: finite(s.currentFreq ?? s.freq ?? s.nrarfcn ?? s.earfcn),
+        lat: finite(s.lat), lon: finite(s.lng ?? s.lon),
+        cell_name: s.cellName || s.name || "",
+      };
+    }).filter((c) => c.rat && c.pci !== null && c.earfcn !== null && c.lat !== null && c.lon !== null);
+    if (!cells.length) return;
+    let latSum = 0, lonSum = 0, nPts = 0;
+    const samples = Array.isArray(optim.samples) ? optim.samples : [];
+    for (const s of samples) {
+      const la = finite(s.lat), lo = finite(s.lon ?? s.lng);
+      if (la !== null && lo !== null) { latSum += la; lonSum += lo; nPts++; }
+    }
+    if (!nPts) return;
+    const centroid = { lat: latSum / nPts, lon: lonSum / nPts };
+    const distByPci = new Map();
+    const wanted = new Set([...overlap.servingCells.map((c) => Number(c.pci)),
+      ...(overlap.neighbor ? [Number(overlap.neighbor.pci)] : [])]);
+    for (const pci of wanted) {
+      const cands = bdd.findCandidates(channel, pci, centroid.lat, centroid.lon, 5000, rat, cells);
+      if (cands.length) distByPci.set(pci, { distM: cands[0]._dist_m, cellName: cands[0].cell_name || undefined });
+    }
+    if (!distByPci.size) return;
+    overlapApplyDistances(overlap, distByPci);
+  }
+
+  function overlapApplyDistances(overlap, distByPci) {
+    const withDist = overlap.servingCells.map((cell) => ({ ...cell, distM: distByPci.get(Number(cell.pci))?.distM ?? null }));
+    const known = withDist.filter((cell) => Number.isFinite(cell.distM));
+    let keeper = null, interferers = [];
+    if (known.length) {
+      known.sort((a, b) => a.distM - b.distM);
+      keeper = known[0].pci;
+      interferers = known.slice(1).filter((cell) =>
+        cell.distM >= known[0].distM * OVERLAP.interfererDistRatio || known.length === 2).map((cell) => cell.pci);
+      if (!interferers.length) interferers = known.slice(1).map((cell) => cell.pci);
+    }
+    let neighborDist = null;
+    if (overlap.neighbor && distByPci.has(Number(overlap.neighbor.pci))) {
+      neighborDist = distByPci.get(Number(overlap.neighbor.pci)).distM;
+    }
+    const fmtCell = (pci) => {
+      const cell = withDist.find((row) => Number(row.pci) === Number(pci));
+      const name = cell?.cellName ? ` ${cell.cellName}` : "";
+      const dist = Number.isFinite(cell?.distM) ? ` (${Math.round(cell.distM)} m)` : "";
+      return `PCI ${pci}${name}${dist}`;
+    };
+    const thinNote = overlap.directional ? ` (${overlap.sampleCount} snapshots — directionnel)` : "";
+    if (keeper !== null && interferers.length) {
+      const extra = overlap.neighbor && !interferers.includes(overlap.neighbor.pci) &&
+        (neighborDist === null || neighborDist >= (withDist.find((row) => Number(row.pci) === Number(keeper))?.distM || 0) * OVERLAP.interfererDistRatio)
+        ? [overlap.neighbor.pci] : [];
+      const targets = [...interferers, ...extra];
+      overlap.keeperPci = keeper;
+      overlap.interferers = targets;
+      overlap.action = `Recouvrement multi-serveurs${thinNote} : forcer ${targets.map(fmtCell).join(" et ")} à ne plus couvrir ce tronçon par downtilt ou baisse de puissance ; conserver ${fmtCell(keeper)} comme serveuse.`;
+    } else {
+      overlap.action = `Recouvrement multi-serveurs${thinNote} entre ${overlap.servingCells.map((c) => `PCI ${c.pci}`).join(", ")} à niveaux comparables (${overlap.spreadDb} dB)${overlap.neighbor ? ` ; voisine PCI ${overlap.neighbor.pci} au même niveau` : ""} : équilibrer tilt/azimut/puissance pour dégager une serveuse dominante ; confirmer la géométrie BDD.`;
+    }
   }
 
   function build(log, incident, context = {}) {
@@ -166,6 +352,7 @@
       recommendations: [incident.primaryRca?.recommendation].filter(Boolean),
       bddStatus: deep ? "loading" : "not_applicable", bddError: error,
       classification: !deep ? `Class non applicable au screening de pollution — ${incident.primaryRca?.label || "RCA à confirmer"}.` : null,
+      overlap: overlapFor(incident, samples, rat),
     };
     return render(incident);
   }
@@ -224,6 +411,7 @@
       }
       recommendations.push("Confirmer l'interférence par scanner/FFT, charge et KPI réseau ; vérifier la signalisation RRC pour toute hypothèse de mobilité, puis mesurer après action.");
       optim.recommendations = [...new Set(recommendations)];
+      overlapRefineWithBdd(optim);
     } catch (error) {
       optim.bddStatus = "unavailable"; optim.bddError = `Enrichissement BDD incomplet : ${error.message}`;
       optim.classification = "Class indéterminée — enrichissement BDD indisponible ; faits DT conservés.";
@@ -254,7 +442,22 @@
         context.onProgress?.(incident);
       }
     };
-    const promise = Promise.all([worker(), worker()]).then(() => analysis);
+    const promise = Promise.all([worker(), worker()]).then(() => {
+      // Local overlap refinement (no Deep Analysis needed): nearest loaded
+      // sector per PCI so short multi-server runs also get a named action.
+      try {
+        const bdd = root.BddMatcher || (typeof require === "function" ? require("./bdd_matcher.js") : null);
+        if (bdd) {
+          for (const incident of incidents) {
+            if (incident.optimAnalysis) overlapRefineLocal(incident.optimAnalysis, sectors, bdd);
+          }
+          for (const incident of incidents) {
+            if (incident.optimAnalysis) render(incident);
+          }
+        }
+      } catch (_) {}
+      return analysis;
+    });
     preparation.promise = promise;
     return promise;
   }

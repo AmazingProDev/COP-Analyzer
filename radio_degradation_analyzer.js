@@ -20,7 +20,7 @@
   const NeighborMobility = globalThis.RadioNeighborMobilityRca || (typeof require === "function" ? require("./radio_neighbor_mobility_rca.js") : null);
   const ScanFusion = globalThis.RadioScanFusion || (typeof require === "function" ? require("./radio_scan_fusion.js") : null);
   const Scoring = globalThis.RadioScoring || (typeof require === "function" ? require("./radio_scoring.js") : null);
-  const VERSION = "lte-nr-radio-v15";
+  const VERSION = "lte-nr-radio-v16"; // COP: v15 + measured-neighbor context on ping-pong incidents
   const DEFAULT_COMMON = Object.freeze(Profiles.radioDefaults(Profiles.DEFAULT));
   const DEFAULT_PROFILES = Object.freeze({
     lte: Object.freeze({ ...DEFAULT_COMMON, id: "lte-radio-default-v2", rat: "LTE" }),
@@ -1337,10 +1337,26 @@
         haversineM(first, middle) / firstGapSec > profile.maxGpsSpeedMps ||
         haversineM(middle, last) / secondGapSec > profile.maxGpsSpeedMps) continue;
       const sequence = [first, middle, last];
+      // Ping-pong snapshots carry the same measured neighbor snapshots as RF
+      // incidents: compute the real neighbor context instead of assuming none.
+      // A hardcoded false wrongly prints "voisinage non mesuré" while Point
+      // Details shows measured neighbors on the same timestamps.
+      const mobilityNeighborContext = (() => {
+        try {
+          const ctx = neighborContextFor(sequence.map((item) => ({ snapshot: item })), profile, last.rat);
+          return {
+            hasMeasuredNeighbors: !!ctx.hasMeasuredNeighbors,
+            measurementCoveragePct: ctx.measurementCoveragePct ?? 0,
+            recurrentNeighborCount: ctx.recurrentNeighborCount ?? 0,
+          };
+        } catch (_) {
+          return { hasMeasuredNeighbors: false, measurementCoveragePct: 0, recurrentNeighborCount: 0 };
+        }
+      })();
       const rca = { code: "PING_PONG_CANDIDATE", label: "Aller-retour serving observé",
         recommendation: "Vérifier voisinage, hystérésis, seuils et temporisations ; confirmer les transitions par RRC.",
         evidence: [`${first.cellName} → ${middle.cellName} → ${last.cellName} en ${durationSec.toFixed(1)} s / ${Math.round(distanceM)} m`],
-        radioContext: { hasMeasuredNeighbors: false, measurementCoveragePct: 0, recurrentNeighborCount: 0 } };
+        radioContext: mobilityNeighborContext };
       const incident = { id: `mobility_${last.rat.toLowerCase()}_${incidents.length + 1}`,
         type: "MOBILITY_ANOMALY", category: "MOBILITY", rat: last.rat,
         startTime: first.time, endTime: last.time, start: { lat: first.lat, lng: first.lng },

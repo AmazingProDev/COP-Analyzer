@@ -47,6 +47,7 @@ Radio engine upgraded to `lte-nr-radio-v15` with `optim-deep-bdd-v6`: serving dw
 - New modules: `radio_profiles.js`, `radio_mos_analyzer.js`, `radio_throughput_analyzer.js`, `radio_scoring.js`, `radio_rca_engine.js`, `radio_neighbor_mobility_rca.js`, `radio_scan_fusion.js`, `route_scan_analyzer.js`, `radio_optim_analysis.js` (script order in `index.html` follows the package spec).
 - `bdd_matcher.js` is a faithful JS port of `bdd_matcher.py` (verified byte-identical output vs Python on a fuzz case + mirrored unit tests). `/api/bdd/match` is served locally from the loaded BDD sectors, so the static app gets full Class/géométrie/recommandations enrichment without backend.
 - Without scan neighbors or BDD, Optim degrades gracefully (measured narratives, explicit unavailable statuses).
+- **Règle overlap multi-serveurs (LTE + NR)** : run dégradé court servi par ≥2 cellules aux niveaux comparables (écart ≤ 6 dB) + voisine mesurée au même niveau → RCA dédiée ; avec BDD, action paramétrée nommant les interférentes lointaines (downtilt/baisse de puissance) et la serveuse à conserver. Confiance plafonnée (directionnel sur ≤5 snapshots).
 
 ## Files
 

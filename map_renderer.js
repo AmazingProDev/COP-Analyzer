@@ -124,6 +124,10 @@ class MapRenderer {
         this.map.getPane('labelsPane').style.zIndex = 760;
         this.map.getPane('labelsPane').style.pointerEvents = 'none';
 
+        // COP: popups/tooltips above every custom pane (sites 750, labels 760, connections 800).
+        this.map.getPane('popupPane').style.zIndex = 850;
+        this.map.getPane('tooltipPane').style.zIndex = 840;
+
         // CUSTOM PANE FOR EVENTS — z=665
         this.map.createPane('eventsPane');
         this.map.getPane('eventsPane').style.zIndex = 665;
@@ -2953,6 +2957,10 @@ class MapRenderer {
                         console.log('[Spider] Sector click handler fired:', s.cellId || s.cellName || s.sc, 'dragJustEnded:', this._siteDragJustEnded);
                         if (this._siteDragJustEnded) return;
                         L.DomEvent.stopPropagation(e);
+                        if (!window.isSpiderMode && !window.isGeoSpiderMode) {
+                            this._showSectorBandsPopup(shapeLayer, s);
+                            return;
+                        }
                         this._dispatchSectorClicked(s, {
                             azimuth: azimuth,
                             range: range,
@@ -3275,7 +3283,9 @@ class MapRenderer {
 
                     } else {
                         // ── MOVE MODE (plain drag) ───────────────────────────────────────────
-                        const dragSiteName = s.siteName || s.name || String(s.cellId || '');
+                        // COP: moving sites on the map is disabled (reference data).
+                        // Shift+drag rotation below remains available.
+                        return;
                         const origLat      = s.lat;
                         const origLng      = s.lng;
                         const origSiteKey  = `${origLat.toFixed(5)}@@${origLng.toFixed(5)}`;
@@ -3509,8 +3519,114 @@ class MapRenderer {
         applyGroup(this.eventLayers);
     }
 
-    _dispatchSectorClicked(sector, overrides = {}) {
-        if (!sector) return false;
+    // COP: click a site sector → popup with ALL bands of that physical
+    // sector (same site + same azimuth), each with PCI + cell name.
+    _showSectorBandsPopup(shapeLayer, s) {
+        if (!shapeLayer || !s) return;
+        const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const norm = (v) => String(v || '').trim().toLowerCase();
+        const siteKey = norm(s.siteName || s.name);
+        const az0 = Number(s.azimuth);
+        const all = [];
+        if (this.siteLayers && typeof this.siteLayers.forEach === 'function') {
+            this.siteLayers.forEach((layer) => { (layer.sectors || []).forEach((x) => { if (x) all.push(x); }); });
+        }
+        if (Array.isArray(this.siteData)) this.siteData.forEach((x) => { if (x) all.push(x); });
+        // Same physical sector = same site + same azimuth (exact degree match).
+        const same = all.filter((x) => {
+            if (x === s) return true;
+            const sameSite = siteKey ? norm(x.siteName || x.name) === siteKey : true;
+            if (!sameSite) {
+                const la1 = Number(x.lat), lo1 = Number(x.lng);
+                if (!(Number.isFinite(la1) && Number.isFinite(lo1) &&
+                    Math.abs(la1 - Number(s.lat)) < 0.0005 && Math.abs(lo1 - Number(s.lng)) < 0.0005)) return false;
+            }
+            if (!Number.isFinite(az0) || !Number.isFinite(Number(x.azimuth))) return x === s;
+            return Math.abs(Number(x.azimuth) - az0) < 0.5;
+        });
+        const lteLabel = (f, band) => {
+            const b = String(band || '').trim();
+            if (/^L\d+/i.test(b)) return b.toUpperCase();
+            const numOf = (txt) => {
+                const m = String(txt || '').match(/^B\s*(\d+)/i);
+                return m ? Number(m[1]) : null;
+            };
+            let num = numOf(b);
+            if (num === null && Number.isFinite(Number(f))) {
+                const v = Number(f);
+                const ranges = [
+                    [0, 599, 1], [600, 1199, 2], [1200, 1949, 3], [1950, 2399, 4],
+                    [2400, 2649, 5], [2750, 3449, 7], [3450, 3799, 8], [6150, 6449, 20],
+                    [9210, 9659, 28], [37750, 38249, 38], [38650, 39649, 40], [39650, 41589, 41],
+                ];
+                const hit = ranges.find((r) => v >= r[0] && v <= r[1]);
+                if (hit) num = hit[2];
+            }
+            const lMap = { 1: 'L2100', 2: 'L1900', 3: 'L1800', 4: 'L1700', 5: 'L850', 7: 'L2600', 8: 'L900', 20: 'L800', 28: 'L700', 38: 'L2600-TDD', 40: 'L2300-TDD', 41: 'L2500-TDD' };
+            return num !== null && lMap[num] ? lMap[num] : '';
+        };
+        const nrLabel = (f, band) => {
+            const b = String(band || '').trim();
+            if (/^n\d+/i.test(b)) return b;
+            if (!Number.isFinite(Number(f))) return '';
+            const v = Number(f);
+            if (v >= 151600 && v <= 160600) return 'n28';
+            if (v >= 361000 && v <= 376000) return 'n3';
+            if (v >= 422000 && v <= 440000) return 'n1';
+            if (v >= 499200 && v <= 538000) return 'n41';
+            if (v >= 600000 && v <= 680000) return 'n78';
+            return '';
+        };
+        const ratOf = (x) => {
+            const t = String(x.tech || x.technology || '').toUpperCase();
+            if (/NR|5G/.test(t)) return '5G';
+            if (/LTE|4G|E-UTRA/.test(t)) return '4G';
+            const b = String(x.band || '').toUpperCase();
+            if (/^N\d+/.test(b)) return '5G';
+            if (/^(B\d+|L\d+)/.test(b)) return '4G';
+            return '';
+        };
+        const seen = new Set();
+        const rows = [];
+        same.forEach((x) => {
+            const rat = ratOf(x);
+            if (rat !== '5G' && rat !== '4G') return;
+            const freq = Number(x.freq ?? x.currentFreq);
+            const pci = x.pci ?? x.sc;
+            const key = rat + '|' + (Number.isFinite(freq) ? freq : '') + '|' + pci;
+            if (seen.has(key)) return;
+            seen.add(key);
+            const label = rat === '5G' ? nrLabel(freq, x.band) : lteLabel(freq, x.band);
+            rows.push({
+                rat, label: label || '—',
+                freq: Number.isFinite(freq) ? freq : '—',
+                pci: pci ?? '—',
+                cell: x.cellName || x.cellId || '',
+            });
+        });
+        rows.sort((a, b) => (a.rat === b.rat ? 0 : (a.rat === '5G' ? -1 : 1)));
+        let html = '<div style="font-family:sans-serif;min-width:230px;max-width:340px;">';
+        if (Number.isFinite(az0)) {
+            html += '<div style="font-size:10px;font-weight:700;color:#888;letter-spacing:.05em;margin-bottom:3px;">SECTEUR ' + esc(Math.round(az0)) + '°</div>';
+        }
+        if (!rows.length) {
+            html += '<div style="font-size:12px;color:#888;">Aucune bande identifiée pour ce secteur.</div>';
+        } else {
+            html += rows.map((r) =>
+                '<div style="display:flex;gap:6px;align-items:baseline;font-size:12px;padding:3px 0;border-bottom:1px solid #eee;">' +
+                '<span style="font-size:10px;font-weight:700;color:#fff;background:' + (r.rat === '5G' ? '#7c3aed' : '#2563eb') + ';border-radius:4px;padding:1px 6px;">' + r.rat + '</span>' +
+                '<span style="font-weight:700;min-width:44px;">' + esc(r.label) + '</span>' +
+                '<span style="color:#555;">' + esc(r.freq) + '</span>' +
+                '<span>PCI <b>' + esc(r.pci) + '</b></span>' +
+                (r.cell ? '<span style="color:#888;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(r.cell) + '</span>' : '') +
+                '</div>').join('');
+        }
+        html += '</div>';
+        shapeLayer.bindPopup(html, { maxWidth: 360, closeButton: true });
+        shapeLayer.openPopup();
+    }
+
+    _dispatchSectorClicked(sector, overrides = {}) {        if (!sector) return false;
         window.dispatchEvent(new CustomEvent('site-sector-clicked', {
             detail: {
                 cellId: sector.cellId,

@@ -206,7 +206,10 @@
         const bddIds = servingBddIds(item, analyzer);
         const gps = incidentGps(item);
         const incidentDate = datePart(item.startTime) || datePart(item.sequence?.[0]?.time) || dtDate;
-        const optimSummary = String(item.optimAnalysis?.executiveSummary || "").trim() ||
+        const optimExec = String(item.optimAnalysis?.executiveSummary || "").trim();
+        const optimOverlap = item.optimAnalysis?.overlap?.applies && String(item.optimAnalysis.overlap.action || "").trim()
+          ? `\n${item.optimAnalysis.overlap.action.trim()}` : "";
+        const optimSummary = (optimExec + optimOverlap).trim() ||
           String(professional.shortDiagnostic || "").replace(/\n/g, " ").trim() ||
           "Analyse Optim non calculée.";
         return {

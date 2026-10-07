@@ -146,6 +146,8 @@
   };
 
   const actionFor = (incident, issue, limitations) => {
+    const overlapAction = incident?.optimAnalysis?.overlap?.action;
+    if (typeof overlapAction === "string" && overlapAction.trim()) return overlapAction;
     const code = text(rcaFor(incident).code, "");
     if (isNrLoss(incident)) return "Qualifier la perte de PSCell NR avec signalisation EN-DC et KPI disponibilité avant correction de paramétrage, puis refaire le parcours.";
     if (/PROBABLE_DELAYED_TRANSITION|TRANSITION_NOT_OBSERVED/.test(code)) return "Confirmer d'abord les événements A3/A5, Measurement Reports, offsets, hystérésis et TTT par RRC/KPI ; ajuster la mobilité uniquement après identification du paramètre responsable.";
