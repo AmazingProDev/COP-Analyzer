@@ -22,9 +22,6 @@
     "Action", "Type_Action", "Etat_Action", "Responsabilité", "X", "Y",
     "CGPS_Debut_X", "CGPS_Debut_Y", "CGPS_Fin_X", "CGPS_Fin_Y", "Trace_CGPS", "LogFile",
     "Symptôme", "Sévérité", "MOS_P50", "Impact_MOS", "Cause_probable", "Preuves",
-    "Niveau_preuve", "Confiance_RCA", "Vérification", "Débit_DL_P50",
-    "RCA_Voisinage_Mobilite", "Meilleure_Voisine", "Classe_Voisine", "Delta_RSRP_P50",
-    "Presence_Degradee_Pct", "Avantage_Continu_s", "Delai_Transition_s", "Top_3_Voisines",
   ];
 
   const finite = (value) => value !== null && value !== undefined && value !== "" &&
@@ -206,10 +203,12 @@
         const bddIds = servingBddIds(item, analyzer);
         const gps = incidentGps(item);
         const incidentDate = datePart(item.startTime) || datePart(item.sequence?.[0]?.time) || dtDate;
+        // A manual edit always wins verbatim (no auto-appended overlap action).
+        const manualExec = String(item.optimExecOverride || "").trim();
         const optimExec = String(item.optimAnalysis?.executiveSummary || "").trim();
-        const optimOverlap = item.optimAnalysis?.overlap?.applies && String(item.optimAnalysis.overlap.action || "").trim()
+        const optimOverlap = !manualExec && item.optimAnalysis?.overlap?.applies && String(item.optimAnalysis.overlap.action || "").trim()
           ? `\n${item.optimAnalysis.overlap.action.trim()}` : "";
-        const optimSummary = (optimExec + optimOverlap).trim() ||
+        const optimSummary = (manualExec || (optimExec + optimOverlap).trim()) ||
           String(professional.shortDiagnostic || "").replace(/\n/g, " ").trim() ||
           "Analyse Optim non calculée.";
         return {
@@ -232,19 +231,6 @@
           "MOS_P50": finite(item.mos?.median), "Impact_MOS": professional.mosImpact || null,
           "Cause_probable": item.analysis?.cause?.name || professional.probableCause || null,
           "Preuves": (item.analysis?.observedEvidence || []).join(" ; ") || null,
-          "Niveau_preuve": item.analysis?.cause?.evidenceLevel || null,
-          "Confiance_RCA": finite(professional.rcaConfidence),
-          "Vérification": professional.verification || null,
-          "Débit_DL_P50": finite(item.throughput?.median),
-          "RCA_Voisinage_Mobilite": item.neighborMobilityRca?.type || null,
-          "Meilleure_Voisine": item.neighborMobilityRca?.targetCell || null,
-          "Classe_Voisine": item.neighborMobilityRca?.target?.class || null,
-          "Delta_RSRP_P50": finite(item.neighborMobilityRca?.target?.delta?.p50),
-          "Presence_Degradee_Pct": finite(item.neighborMobilityRca?.target?.degradedPresencePct),
-          "Avantage_Continu_s": finite(item.neighborMobilityRca?.target?.longestBetter?.durationSec),
-          "Delai_Transition_s": finite(item.neighborMobilityRca?.transition?.delaySec),
-          "Top_3_Voisines": (item.neighborMobilityRca?.topCandidates || []).map((candidate) =>
-            `${candidate.cellName}: ${candidate.class}, ΔP50 ${candidate.delta.p50 ?? "N/D"} dB, ${candidate.degradedPresencePct}%`).join(" | ") || null,
         };
       });
     return {

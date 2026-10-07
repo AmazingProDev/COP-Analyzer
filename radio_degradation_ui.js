@@ -119,7 +119,9 @@
   const filtersFor = (log) => {
     const analysis = log?.radioDegradationAnalysis;
     if (!analysis) return defaultFilters();
-    analysis.viewFilters = { ...defaultFilters(), ...(analysis.viewFilters || {}) };
+    // Stable reference: recreating the object on every call orphaned the
+    // closure captured by refreshFilters, so no filter change ever applied.
+    if (!analysis.viewFilters) analysis.viewFilters = defaultFilters();
     return analysis.viewFilters;
   };
   const filteredRows = (log) => {
@@ -995,6 +997,15 @@
 
     const renderRows = () => {
       const rows = filteredRows(log);
+      // Keep the summary cards aligned with the filtered list (e.g. Min. points).
+      try {
+        const scoped = root.RadioProfessionalReport && typeof root.RadioProfessionalReport.executiveFor === "function"
+          ? root.RadioProfessionalReport.executiveFor(rows.map((item) => ({ ...item, professional: professionalFor(item) || item.professional })), exportMetaFor(log))
+          : null;
+        if (scoped && Array.isArray(scoped.cards)) {
+          q("#radioDegradationSummary").innerHTML = scoped.cards.map(([label, value]) => summaryCard(label, value, /Passage|Nombre/.test(label) ? "#fb7185" : /5G|NR/.test(label) ? "#a78bfa" : "#67e8f9")).join("");
+        }
+      } catch (_) {}
       renderTimeline(modal, analysis, rows[0]);
       q("#radioDegradationRows").innerHTML = rows.map((item) => {
         const professional = professionalFor(item) || {};
@@ -1029,7 +1040,7 @@
           <td style="padding:8px;white-space:nowrap;">${escapeHtml(item.startTime || "—")}</td>
           <td style="padding:8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(professional.servingCell || item.dominantServing?.cellName || "")}">${escapeHtml(professional.servingCell || item.dominantServing?.cellName || "Non résolu")}<div style="font-size:10px;color:#94a3b8;">${escapeHtml(professional.servingRole || item.dominantServing?.role || "Serving")}${item.dominantServing?.nameSource === "bdd" ? " · BDD (PCI/freq/proximité)" : " · source DT"}</div></td>
           <td style="padding:8px;text-align:center;white-space:nowrap;">${escapeHtml(professional.band || item.band || "—")}<div style="font-size:10px;color:#94a3b8;">${professional.frequency ?? item.channel ?? "—"}</div></td>
-          <td style="padding:8px;min-width:520px;max-width:680px;vertical-align:top;"><div style="color:#a7f3d0;white-space:pre-wrap;">${escapeHtml(item.optimAnalysis?.executiveSummary || "Analyse Optim en préparation…")}</div></td>
+          <td style="padding:8px;min-width:520px;max-width:680px;vertical-align:top;"><div style="color:#a7f3d0;white-space:pre-wrap;">${escapeHtml(item.optimAnalysis?.executiveSummary || "Analyse Optim en préparation…")}</div><div><button data-optim-edit style="margin-top:6px;font-size:10px;padding:2px 9px;border-radius:5px;background:rgba(59,130,246,0.16);border:1px solid rgba(147,197,253,0.4);color:#bfdbfe;cursor:pointer;">✎ Modifier</button></div></td>
           <td style="padding:8px;text-align:center;white-space:nowrap;">P50 ${number(item.dominance?.p50)} dB<div style="font-size:10px;color:#94a3b8;">&lt;3 dB ${number(item.dominance?.weakPct)}% · voisin +6 ${number(item.dominance?.neighborBetter6Pct)}%</div></td>
           <td style="padding:8px;text-align:right;white-space:nowrap;">${number(item.metrics?.rsrp?.median)} / ${number(item.metrics?.rsrp?.p10)} dBm</td>
           <td style="padding:8px;text-align:right;white-space:nowrap;">${number(item.metrics?.sinr?.median)} / ${number(item.metrics?.sinr?.p10)} dB</td>
@@ -1042,6 +1053,30 @@
         row.onclick = (event) => {
           if (event.target?.closest("button[data-scan-deep]") && incident) {
             openScanDeepAnalysis(log, incident);
+            return;
+          }
+          // Inline Analyse Optim editor (writes through to the incident).
+          const editBtn = event.target?.closest("button[data-optim-edit]");
+          if (editBtn && incident && incident.optimAnalysis) {
+            const cell = editBtn.closest("td");
+            const current = incident.optimAnalysis.executiveSummary || "";
+            cell.innerHTML = `<textarea data-optim-text style="width:100%;box-sizing:border-box;min-height:90px;font-size:11px;padding:6px;border-radius:5px;border:1px solid #475569;background:#0f172a;color:#e5e7eb;">${escapeHtml(current)}</textarea>
+              <div style="margin-top:5px;display:flex;gap:6px;"><button data-optim-save style="font-size:10px;padding:2px 10px;border-radius:5px;background:#15803d;border:1px solid #16a34a;color:#fff;cursor:pointer;">Enregistrer</button><button data-optim-cancel style="font-size:10px;padding:2px 10px;border-radius:5px;background:#374151;border:1px solid #4b5563;color:#e5e7eb;cursor:pointer;">Annuler</button></div>`;
+            const area = cell.querySelector("textarea[data-optim-text]");
+            if (area) { area.focus(); area.setSelectionRange(area.value.length, area.value.length); }
+            return;
+          }
+          const saveBtn = event.target?.closest("button[data-optim-save]");
+          if (saveBtn && incident && incident.optimAnalysis) {
+            const area = row.querySelector("textarea[data-optim-text]");
+            const value = String(area ? area.value : "").trim() || "Analyse Optim non calculée.";
+            incident.optimAnalysis.executiveSummary = value;
+            incident.optimExecOverride = value;
+            renderRows();
+            return;
+          }
+          if (event.target?.closest("button[data-optim-cancel]")) {
+            renderRows();
             return;
           }
           const decisionButton = event.target?.closest("button[data-decision]");
@@ -1082,6 +1117,15 @@
       renderRows();
     };
     ["#radioFilterLte", "#radioFilterNr", "#radioFilterCoverage", "#radioFilterSinr", "#radioFilterAvailability", "#radioFilterMobility", "#radioFilterMos", "#radioFilterMosCorrelated", "#radioFilterThroughput", "#radioFilterScope", "#radioFilterBand", "#radioFilterPriority", "#radioFilterIssue", "#radioFilterRca", "#radioFilterConfidence", "#radioFilterMinPoints", "#radioFilterTop"].forEach((selector) => { q(selector).onchange = refreshFilters; });
+    // Min. points reacts while typing (change alone needs blur/Enter).
+    const minPointsInput = q("#radioFilterMinPoints");
+    if (minPointsInput) {
+      let minPointsTimer = null;
+      minPointsInput.addEventListener("input", () => {
+        if (minPointsTimer) clearTimeout(minPointsTimer);
+        minPointsTimer = setTimeout(refreshFilters, 350);
+      });
+    }
     q("#radioShowMap").onclick = () => { refreshFilters(); showRadioSegmentsOnMap(log); };
     ["#radioDegradationDate", "#radioDegradationTestType", "#radioDegradationPlaque", "#radioDegradationLogfile"].forEach((selector) => {
       q(selector).oninput = () => updateRadioExportMeta(log, modal);
@@ -1172,6 +1216,12 @@
     renderRows();
     optimReady.then(() => {
       if (log.radioDegradationAnalysis !== analysis || modal.style.display === "none") return;
+      // Re-apply manual Analyse Optim edits (prepare rebuilds the narratives).
+      for (const item of analysis.incidents || []) {
+        if (item.optimExecOverride && item.optimAnalysis) {
+          item.optimAnalysis.executiveSummary = item.optimExecOverride;
+        }
+      }
       applyProfessionalReport(log, exportMetaFor(log));
       renderRows();
     }).catch((error) => { console.error("Analyse Optim", error); });
