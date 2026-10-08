@@ -158,7 +158,13 @@
       if (filters.confidence !== "all" && professional?.rcaConfidenceClass !== filters.confidence) return false;
       return Number(row.sampleCount || 0) >= Math.max(1, Number(filters.minPoints) || 1);
     });
-    rows.sort((a, b) => a.rat.localeCompare(b.rat) || a.rank - b.rank);
+    // COP: chronological order (Top N keeps the N earliest per RAT).
+    rows.sort((a, b) => {
+      const ta = Number(a.timeMs ?? Date.parse(a.startTime));
+      const tb = Number(b.timeMs ?? Date.parse(b.startTime));
+      if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta - tb;
+      return String(a.startTime || "").localeCompare(String(b.startTime || ""));
+    });
     const max = filters.top === "all" ? Infinity : Math.max(1, Number(filters.top) || 20);
     const perRat = { LTE: 0, NR: 0, MOS: 0, DATA: 0 };
     return rows.filter((row) => {

@@ -17,10 +17,8 @@
   ];
   const ANALYSIS_HEADERS = [
     "ID", "Année", "Semaine", "Date_parcours", "Parcours", "Type_Test", "Problème",
-    "Occurence", "Analyse Optim", "LAC", "CID", "Nom_Cellule", "Niveau", "Qualité",
-    "Action", "Type_Action", "Etat_Action", "Responsabilité", "X", "Y",
-    "CGPS_Debut_X", "CGPS_Debut_Y", "CGPS_Fin_X", "CGPS_Fin_Y", "Trace_CGPS", "LogFile",
-    "Symptôme", "Sévérité", "MOS_P50", "Impact_MOS", "Cause_probable", "Preuves",
+    "Occurence", "LAC", "CID", "Nom_Cellule", "Niveau", "Qualité",
+    "Analyse Optim", "Type_Action", "Etat_Action", "Responsabilité", "X", "Y",
   ];
 
   const finite = (value) => value !== null && value !== undefined && value !== "" &&
@@ -237,7 +235,7 @@
       "Parcours": parcours, "Type_parcours": meta.testType || "Drive Test 4G/5G",
       "Nbr coupure": finite(voiceSummary.drops) ?? 0,
       "Nbr echecs": finite(voiceSummary.failures) ?? 0,
-      "Nbr de dégradation": (analysis.incidents || []).filter((item) => !item?.stationary).length,
+      "Nbr de dégradation": (analysis.incidents || []).filter((item) => item?.reviewState === "validated").length,
       "% bonne couverture (RSRP>-115 dBm)": share((item) => { const v = finite(item?.rsrp); return v === null ? null : v > -115; }),
       "% bonne qualité (SINR>0 dB)": share((item) => { const v = finite(item?.sinr); return v === null ? null : v > 0; }),
       "% bon MOS (MOS>2.2)": mosValues.length ? Math.round((mosValues.filter((value) => value > 2.2).length / mosValues.length) * 10000) / 100 : null,
@@ -282,17 +280,8 @@
           "LAC": bddIds?.locationArea ?? null, "CID": bddIds?.cid ?? null,
           "Nom_Cellule": professional.servingCell || serving.cellName || null,
           "Niveau": finite(item.metrics?.rsrp?.median), "Qualité": finite(item.metrics?.sinr?.median),
-          "Action": professional.recommendedAction || item.primaryRca?.recommendation || null,
           "Type_Action": "Vérification radio", "Etat_Action": null, "Responsabilité": null,
           "X": gps.start?.lng ?? null, "Y": gps.start?.lat ?? null,
-          "CGPS_Debut_X": gps.start?.lng ?? null, "CGPS_Debut_Y": gps.start?.lat ?? null,
-          "CGPS_Fin_X": gps.end?.lng ?? null, "CGPS_Fin_Y": gps.end?.lat ?? null,
-          "Trace_CGPS": gps.trace, "LogFile": logName,
-          "Symptôme": professional.symptom || item.analysis?.symptom?.name || null,
-          "Sévérité": professional.severity || null,
-          "MOS_P50": finite(item.mos?.median), "Impact_MOS": professional.mosImpact || null,
-          "Cause_probable": item.analysis?.cause?.name || professional.probableCause || null,
-          "Preuves": (item.analysis?.observedEvidence || []).join(" ; ") || null,
         };
       });
     return {
@@ -315,7 +304,7 @@
       sheet["!autofilter"] = { ref: sheet["!ref"] };
       return sheet;
     };
-    const hiddenAnalyse = [26, 27, 28, 29, 30, 31];
+    const hiddenAnalyse = [];
     xlsx.utils.book_append_sheet(workbook, makeSheet(payload.statistiquesHeaders, payload.statistiquesRows, []), "Statistiques");
     xlsx.utils.book_append_sheet(workbook, makeSheet(payload.analyseHeaders, payload.analyseRows, hiddenAnalyse), "Analyse");
     xlsx.utils.book_append_sheet(workbook, makeSheet(payload.validerHeaders || payload.analyseHeaders, payload.validerRows || [], hiddenAnalyse), "Valider");
@@ -347,8 +336,8 @@
     ];
     const sheets = [
       { name: "Statistiques", headers: payload.statistiquesHeaders, rows: payload.statistiquesRows, hidden: [] },
-      { name: "Analyse", headers: payload.analyseHeaders, rows: payload.analyseRows, hidden: [26, 27, 28, 29, 30, 31] },
-      { name: "Valider", headers: payload.validerHeaders || payload.analyseHeaders, rows: payload.validerRows || [], hidden: [26, 27, 28, 29, 30, 31] },
+      { name: "Analyse", headers: payload.analyseHeaders, rows: payload.analyseRows, hidden: [] },
+      { name: "Valider", headers: payload.validerHeaders || payload.analyseHeaders, rows: payload.validerRows || [], hidden: [] },
     ];
     for (const sheet of sheets) {
       const nCols = sheet.headers.length;

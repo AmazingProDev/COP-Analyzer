@@ -47687,7 +47687,30 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
           ? "GERAN"
           : "UTRA";
     const hasLteSinrColumn = servingRat === "LTE" || servingRat === "NR";
-    const totalDetailColumns = hasLteSinrColumn ? 8 : 7;
+    // COP LITE: point MOS (same value for all serving rows) shown after SINR.
+    const pointMosForDetails = (() => {
+      const cands = [p.mos, p["MOS DL"],
+        p.properties && (p.properties["Audio quality MOS DL"] ?? p.properties["MOS DL"] ?? p.properties["MOS"])];
+      for (const v of cands) {
+        if (v === undefined || v === null) continue;
+        const s = String(v).trim();
+        if (!s || s.toUpperCase() === "N/A") continue;
+        const n = Number(s);
+        if (Number.isFinite(n)) return Math.round(n * 100) / 100;
+      }
+      return null;
+    })();
+    const hasMosColumn = window.COP_LITE && pointMosForDetails !== null;
+    const mosCellHtml = '<td class="log-cell-val">' + pointMosForDetails + "</td>";
+    // COP LITE: serving rows stick under each other while scrolling.
+    let servingStickyIdx = 0;
+    const servingStickyAttr = () => {
+      if (!window.COP_LITE) return "";
+      const attr = ` style="background:#101828;position:sticky;top:${servingStickyIdx * 32}px;z-index:5;box-shadow:0 1px 0 rgba(148,163,184,0.25);"`;
+      servingStickyIdx += 1;
+      return attr;
+    };
+    const totalDetailColumns = (hasLteSinrColumn ? 8 : 7) + (hasMosColumn ? 1 : 0);
     const resolveN = (neighbor) => {
       const rat = normalizeNeighborRat(neighbor && neighbor.rat) || "LTE";
       const psc = parseFiniteInt(neighbor && neighbor.psc);
@@ -48580,6 +48603,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const normalizedType = typ.toUpperCase();
         const isNrPrimary = isNr && (normalizedType === "PSCELL" || normalizedType === "SPCELL");
         const isPrimary = normalizedType === "PCELL" || normalizedType === "SERVING" || isNrPrimary;
+        if (window.COP_LITE && !isPrimary) return; // COP LITE: hide SCells in serving
         let roleLabel;
         if (isNrPrimary) roleLabel = normalizedType === "SPCELL" ? "NR SpCell" : "NR PSCell";
         else if (isPrimary) roleLabel = isNr ? "NR PSCell" : "LTE PCell";
@@ -48614,7 +48638,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             : "");
         rows +=
           '<tr class="log-row serving-row"' +
-          (isNr ? ' style="background:rgba(56,189,248,0.06);"' : "") +
+          (window.COP_LITE ? servingStickyAttr() : (isNr ? ' style="background:rgba(56,189,248,0.06);"' : "")) +
           ">" +
           '<td class="log-cell-type" style="color:' +
           roleColor +
@@ -48642,6 +48666,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
           (hasLteSinrColumn
             ? '<td class="log-cell-val">' + colVal(cell.sinr, "sinr") + "</td>"
             : "") +
+          (hasMosColumn ? mosCellHtml : "") +
           '<td class="log-cell-val">' +
           freqCell +
           "</td>" +
@@ -48712,15 +48737,32 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
           ? `${nrPrimaryPci}/${nrPrimaryChannel}`
           : String(nrPrimaryPci);
       }
+    } else {
+      // COP: LTE-only mrdc points — the header must use the same BDD-resolved
+      // LTE PCell as the serving table, not a stale cross-RAT name.
+      const mrdcLtePrimary = mrdcServingCells.find((cell) => {
+        const technology = String(cell && cell.technology || "").toUpperCase();
+        const type = String(cell && cell.type || "").trim().toUpperCase();
+        return (technology === "LTE" || technology === "4G" || technology === "E-UTRA") &&
+          (type === "PCELL" || type === "SERVING");
+      });
+      if (mrdcLtePrimary) {
+        const ltePrimaryResolved = resolveMrdcCell(mrdcLtePrimary);
+        if (ltePrimaryResolved && ltePrimaryResolved.name && ltePrimaryResolved.name !== "Unknown") {
+          effectiveServingName = ltePrimaryResolved.name;
+          effectiveServingResolved = ltePrimaryResolved;
+          effectiveServingIdentity = ltePrimaryResolved.id || String(Number(mrdcLtePrimary.pci));
+        }
+      }
     }
     if (!mrdcServingCells.length && p.__mosServingUnavailable) {
-      rows += '<tr class="log-row"><td colspan="' + (hasLteSinrColumn ? 8 : 7) +
+      rows += '<tr class="log-row"><td colspan="' + totalDetailColumns +
         '" style="padding:10px;color:#fbbf24;">MOS/GPS mesuré ; aucune cellule serveuse ni RSRP/RSRQ/SINR mesurés à cet horodatage dans le DT.</td></tr>';
       effectiveServingName = "Cellule serveuse non mesurée";
       effectiveServingResolved = null;
     } else if (!mrdcServingCells.length)
       rows +=
-      '<tr class="log-row serving-row">' +
+      '<tr class="log-row serving-row"' + (window.COP_LITE ? servingStickyAttr() : "") + ">" +
       '<td class="log-cell-type">' +
       lteServingTypeLabel +
       "</td>" +
@@ -48743,6 +48785,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       (hasLteSinrColumn
         ? '<td class="log-cell-val">' + colVal(sSinr, "sinr") + "</td>"
         : "") +
+      (hasMosColumn ? mosCellHtml : "") +
       '<td class="log-cell-val">' +
       _srvFreqCell +
       "</td>" +
@@ -48785,7 +48828,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         // no-op
       }
       rows +=
-        '<tr class="log-row serving-row" style="background:rgba(56,189,248,0.06);">' +
+        '<tr class="log-row serving-row"' + (window.COP_LITE ? servingStickyAttr() : ' style="background:rgba(56,189,248,0.06);"') + ">" +
         '<td class="log-cell-type" style="color:#38bdf8;">NR SCG</td>' +
         '<td class="log-cell-name"><span style="color:#38bdf8;">' +
         nrServingName +
@@ -48804,6 +48847,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             colVal(nrServingSsSinr, "sinr") +
             "</td>"
           : "") +
+        (hasMosColumn ? mosCellHtml : "") +
         '<td class="log-cell-val">' +
         nrArfcnDisplay +
         "</td>" +
@@ -48857,7 +48901,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       );
       const anchorBand = freqBandLabel(anchorEarfcn, "LTE");
       rows +=
-        '<tr class="log-row serving-row" style="background:rgba(34,197,94,0.06);">' +
+        '<tr class="log-row serving-row"' + (window.COP_LITE ? servingStickyAttr() : ' style="background:rgba(34,197,94,0.06);"') + ">" +
         '<td class="log-cell-type" style="color:#22c55e;">LTE PCell (anchor)</td>' +
         '<td class="log-cell-name"><span style="color:#22c55e;">' +
         anchorName +
@@ -48872,7 +48916,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         colVal(anchor.rsrq, "rsrq") +
         '</td><td class="log-cell-val">' +
         colVal(anchor.sinr, "sinr") +
-        '</td><td class="log-cell-val">' +
+        "</td>" +
+        (hasMosColumn ? mosCellHtml : "") +
+        '<td class="log-cell-val">' +
         (Number.isFinite(anchorEarfcn) ? String(anchorEarfcn) : "-") +
         (anchorBand
           ? ' <span style="color:#94a3b8;font-size:9px;">(' + anchorBand + ")</span>"
@@ -48923,6 +48969,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
           '<td class="log-cell-val">' + colVal(scRsrp, "rsrp") + '</td>' +
           '<td class="log-cell-val">' + colVal(scRsrq, "rsrq") + '</td>' +
           (hasLteSinrColumn ? '<td class="log-cell-val">' + colVal(scSinr, "sinr") + '</td>' : '') +
+          (hasMosColumn ? mosCellHtml : '') +
           '<td class="log-cell-val">' + scFreqDisplay + '</td>' +
           '<td class="log-cell-val">' + scDistanceDisplay + '</td>' +
           '</tr>';
@@ -49125,6 +49172,25 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       );
     };
 
+    // COP LITE: serving NR channel for intra/inter split (mrdc primary, else decoded, else NR serving freq).
+    const srvNrChannelForSplit = (() => {
+      const c1 = mrdcNrPrimary && Number(mrdcNrPrimary.channel);
+      if (Number.isFinite(c1)) return c1;
+      if (Number.isFinite(nrServingArfcn)) return nrServingArfcn;
+      if (servingRat === "NR") {
+        const sf = parseFiniteInt(sFreq);
+        if (sf !== null) return sf;
+      }
+      return null;
+    })();
+    const _isNrIntraFreq = (n) => {
+      const nt = String(n.neighbor_type || "").toLowerCase();
+      if (nt.includes("intra")) return true;
+      if (nt.includes("inter")) return false;
+      const nFreq = parseFiniteInt(n.freq);
+      return srvNrChannelForSplit !== null && nFreq !== null && nFreq === srvNrChannelForSplit;
+    };
+
     if (servingRat === "LTE") {
       const lteNeighbors = sortedByPrimaryThenSecondaryDesc(
         neighbors
@@ -49165,28 +49231,38 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       const lteInterNeighbors = lteNeighbors.filter((n) => !_isIntraFreq(n));
 
       if (isEnDc && nrNeighbors.length) {
-        pushSectionHeaderRow("NR Neighbors", [
-          "PCI",
-          "SS-RSRP",
-          "SS-RSRQ",
-          "SS-SINR",
-          "NR-ARFCN",
-          "DIST",
-        ]);
-        nrNeighbors.forEach((n, idx) => {
-          pushNeighborRow(
-            "NR-N" + (idx + 1),
-            buildNeighborNameCell(n),
-            [
-              n.sc !== undefined && n.sc !== "-" ? n.sc : "-",
-              colVal(n.rscp, "rsrp"),
-              colVal(n.ecno, "rsrq"),
-              colVal(n.sinr, "sinr"),
-              _nbFreqCell(n, "NR"),
-              n.distance || "-",
-            ],
-            "color:#38bdf8;",
-          );
+        const nrIntraNeighbors = nrNeighbors.filter((n) => _isNrIntraFreq(n));
+        const nrInterNeighbors = nrNeighbors.filter((n) => !_isNrIntraFreq(n));
+        const nrSplit = window.COP_LITE && srvNrChannelForSplit !== null;
+        const nrArfcnLabel = srvNrChannelForSplit !== null ? " (NR-ARFCN " + srvNrChannelForSplit + ")" : "";
+        const nrGroups = nrSplit
+          ? [["NR Intra-Frequency Neighbors" + nrArfcnLabel, nrIntraNeighbors], ["NR Inter-Frequency Neighbors", nrInterNeighbors]]
+          : [["NR Neighbors", nrNeighbors]];
+        nrGroups.forEach(([nrTitle, nrList], nrGi) => {
+          if (!nrList.length) return;
+          pushSectionHeaderRow(nrTitle, [
+            "PCI",
+            "SS-RSRP",
+            "SS-RSRQ",
+            "SS-SINR",
+            "NR-ARFCN",
+            "DIST",
+          ]);
+          nrList.forEach((n, idx) => {
+            pushNeighborRow(
+              "NR-N" + (nrSplit ? (nrGi === 0 ? "A" + (idx + 1) : "E" + (idx + 1)) : idx + 1),
+              buildNeighborNameCell(n),
+              [
+                n.sc !== undefined && n.sc !== "-" ? n.sc : "-",
+                colVal(n.rscp, "rsrp"),
+                colVal(n.ecno, "rsrq"),
+                colVal(n.sinr, "sinr"),
+                _nbFreqCell(n, "NR"),
+                n.distance || "-",
+              ],
+              "color:#38bdf8;",
+            );
+          });
         });
       }
 
@@ -49390,23 +49466,33 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         "ecno",
       );
       if (nrNeighbors.length) {
-        pushSectionHeaderRow("NR Neighbors", [
-          "PCI",
-          "SS-RSRP",
-          "SS-RSRQ",
-          "SS-SINR",
-          "NR-ARFCN",
-          "DIST",
-        ]);
-        nrNeighbors.forEach((n, idx) => {
-          pushNeighborRow("NR-N" + (idx + 1), buildNeighborNameCell(n), [
-            n.sc,
-            colVal(n.rscp, "rsrp"),
-            colVal(n.ecno, "rsrq"),
-            colVal(n.sinr, "sinr"),
-            _nbFreqCell(n, "NR"),
-            n.distance || "-",
-          ], "color:#38bdf8;");
+        const nrIntraNeighbors = nrNeighbors.filter((n) => _isNrIntraFreq(n));
+        const nrInterNeighbors = nrNeighbors.filter((n) => !_isNrIntraFreq(n));
+        const nrSplit = window.COP_LITE && srvNrChannelForSplit !== null;
+        const nrArfcnLabel = srvNrChannelForSplit !== null ? " (NR-ARFCN " + srvNrChannelForSplit + ")" : "";
+        const nrGroups = nrSplit
+          ? [["NR Intra-Frequency Neighbors" + nrArfcnLabel, nrIntraNeighbors], ["NR Inter-Frequency Neighbors", nrInterNeighbors]]
+          : [["NR Neighbors", nrNeighbors]];
+        nrGroups.forEach(([nrTitle, nrList], nrGi) => {
+          if (!nrList.length) return;
+          pushSectionHeaderRow(nrTitle, [
+            "PCI",
+            "SS-RSRP",
+            "SS-RSRQ",
+            "SS-SINR",
+            "NR-ARFCN",
+            "DIST",
+          ]);
+          nrList.forEach((n, idx) => {
+            pushNeighborRow("NR-N" + (nrSplit ? (nrGi === 0 ? "A" + (idx + 1) : "E" + (idx + 1)) : idx + 1), buildNeighborNameCell(n), [
+              n.sc,
+              colVal(n.rscp, "rsrp"),
+              colVal(n.ecno, "rsrq"),
+              colVal(n.sinr, "sinr"),
+              _nbFreqCell(n, "NR"),
+              n.distance || "-",
+            ], "color:#38bdf8;");
+          });
         });
       }
       if (lteNeighbors.length) {
@@ -55650,6 +55736,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       qualHeader +
       "</th>" +
       (hasLteSinrColumn ? "<th>SINR</th>" : "") +
+      (hasMosColumn ? "<th>MOS</th>" : "") +
       "<th>Freq</th>" +
       "<th>Dist</th>" +
       "</tr>" +
