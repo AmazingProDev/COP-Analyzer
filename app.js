@@ -63085,6 +63085,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
   const siteColorBy = document.getElementById("siteColorBy"); // NEW
   const siteMarkerShape = document.getElementById("siteMarkerShape");
 
+  if (closeSettings && settingsPanel) {
+    closeSettings.onclick = () => (settingsPanel.style.display = "none");
+  }
+
   if (settingsBtn && settingsPanel) {
     settingsBtn.onclick = () => {
       // Open in "Global Mode"
@@ -63095,7 +63099,6 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       settingsPanel.style.display =
         settingsPanel.style.display === "none" ? "block" : "none";
     };
-    closeSettings.onclick = () => (settingsPanel.style.display = "none");
 
     const updateSiteStyles = () => {
       const range = document.getElementById("rangeSiteDist").value;
@@ -85365,7 +85368,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     } catch (error) {
       console.warn("[BDD] Bundled inventory manifest unavailable:", error);
     }
-    _loadSarfOnStartup(bundle);
+    // COP LITE: no bundled SARF auto-load — startup shows BDD layers only.
+    // SARF stays available via File > Import > Sites.
     let activeBundleVersion = null;
     try { activeBundleVersion = localStorage.getItem(_BDD_BUNDLE_VERSION_KEY); } catch (_) {}
     if (bundle && bundle.bdd && bundle.version !== activeBundleVersion) {
@@ -85408,29 +85412,6 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         }
       })
       .catch(() => {});
-  }
-
-  async function _loadSarfOnStartup(bundle) {
-    if (!bundle || !bundle.sarf || !window.mapRenderer) return;
-    try {
-      const response = await fetch(bundle.sarf);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const workbook = XLSX.read(await response.arrayBuffer(), { type: "array" });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const sectors = XLSX.utils.sheet_to_json(sheet, { defval: "" }).map((row) => ({
-        lat: Number(row.Y), lng: Number(row.X), azimuth: Number(row.Azimuth) || 0,
-        name: String(row["Site name"] || ""), siteName: String(row["Site name"] || ""),
-        cellName: String(row["Cell name"] || ""), cellId: String(row["Cell name"] || ""),
-        pci: Number(row.PCI), sc: Number(row.PCI), freq: Number(row["DL EARFCN"]),
-        rnc: Number(row.eNodeBID), tech: "4G", color: "#f97316", source: "SARF",
-      })).filter((sector) => Number.isFinite(sector.lat) && Number.isFinite(sector.lng));
-      if (!sectors.length) throw new Error("Aucun secteur SARF valide");
-      const id = "sarf_autoroute_rabat_casa";
-      window.mapRenderer.addSiteLayer(id, "SARF Autoroute Rabat - Casa", sectors, false);
-      addSiteLayerToSidebar(id, "SARF Autoroute Rabat - Casa", sectors.length);
-    } catch (error) {
-      console.error("[SARF] Bundled inventory unavailable:", error);
-    }
   }
 
   // COP LITE: BDD (200k+ sectors) loads only after login so the landing
