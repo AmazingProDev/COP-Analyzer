@@ -20,7 +20,7 @@
   const NeighborMobility = globalThis.RadioNeighborMobilityRca || (typeof require === "function" ? require("./radio_neighbor_mobility_rca.js") : null);
   const ScanFusion = globalThis.RadioScanFusion || (typeof require === "function" ? require("./radio_scan_fusion.js") : null);
   const Scoring = globalThis.RadioScoring || (typeof require === "function" ? require("./radio_scoring.js") : null);
-  const VERSION = "lte-nr-radio-v16"; // COP: v15 + measured-neighbor context on ping-pong incidents
+  const VERSION = "lte-nr-radio-v17"; // COP: v16 + hard min-degraded-snapshots gate (no fast-critical bypass on count)
   const DEFAULT_COMMON = Object.freeze(Profiles.radioDefaults(Profiles.DEFAULT));
   const DEFAULT_PROFILES = Object.freeze({
     lte: Object.freeze({ ...DEFAULT_COMMON, id: "lte-radio-default-v2", rat: "LTE" }),
@@ -971,9 +971,10 @@
       const degradedDensity = degraded.length / current.length;
       const fastCritical = current.some((row, index) => row.snapshot.bucketStats?.maxCriticalRun >= profile.criticalConsecutiveSnapshots ||
         index > 0 && row.critical && current[index - 1].critical);
-      if ((degraded.length < profile.minDegradedSnapshots || degradedDensity < profile.minDegradedDensity) && !fastCritical) {
-        current = null; return;
-      }
+      // COP: the degraded-snapshot minimum is a hard gate (critical runs do
+      // not bypass the count). Density keeps the fast-critical bypass.
+      if (degraded.length < profile.minDegradedSnapshots) { current = null; return; }
+      if (degradedDensity < profile.minDegradedDensity && !fastCritical) { current = null; return; }
       const first = current[0].snapshot;
       const last = current[current.length - 1].snapshot;
       const durationSec = Math.max(0, (last.timeMs - first.timeMs) / 1000);

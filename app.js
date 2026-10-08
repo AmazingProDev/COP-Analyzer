@@ -80284,7 +80284,12 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
           if (type === "radio_incidents") {
             e.preventDefault();
             e.stopPropagation();
-            window.showRadioDegradationAnalysis?.(log.id);
+            // COP LITE: detection setup popup first, review after launch.
+            if (window.COP_LITE && typeof window.showRadioDetectionSetup === "function") {
+              window.showRadioDetectionSetup(log.id);
+            } else {
+              window.showRadioDegradationAnalysis?.(log.id);
+            }
             return;
           }
           if (type === "voice_incidents") {

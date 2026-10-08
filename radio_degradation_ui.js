@@ -33,6 +33,14 @@
   };
   const analysisRows = (log) => Array.isArray(log?.radioDegradationAnalysis?.incidents)
     ? log.radioDegradationAnalysis.incidents : [];
+  // Selected row highlight (validated rows always stay highlighted).
+  let selectedRadioRowId = null;
+  const paintRadioRowState = (tr, incident) => {
+    const isSel = tr.dataset.radioId === selectedRadioRowId;
+    const isVal = incident && incident.reviewState === "validated";
+    tr.style.background = isSel ? "rgba(59,130,246,0.22)" : (isVal ? "rgba(21,128,61,0.20)" : "");
+    tr.style.boxShadow = isSel ? "inset 3px 0 0 #3b82f6" : (isVal ? "inset 3px 0 0 #22c55e" : "");
+  };
   const contextsFor = (item) => Array.isArray(item?.contextRca)
     ? item.contextRca : (item?.secondaryRca ? [item.secondaryRca] : []);
   const applyProfessionalReport = (log, meta = null) => {
@@ -451,7 +459,7 @@
           <button id="radioDegradationClose" type="button" title="Fermer" style="width:28px;height:28px;border:0;background:transparent;color:#94a3b8;font-size:22px;cursor:pointer;">×</button>
         </div>
         <div class="modal-body" id="radioDegradationBody" style="padding:12px;overflow:auto;">
-          <div id="radioDegradationSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin-bottom:10px;"></div>
+          <div id="radioDegradationSummary" style="display:none;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin-bottom:10px;"></div>
           <section id="radioProfessionalSummary" style="margin:0 0 12px;padding:12px;border:1px solid #334155;border-radius:7px;background:#0b1220;color:#dbeafe;"></section>
           <fieldset style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin:0 0 10px;padding:9px 10px;border:1px solid #334155;border-radius:6px;background:#0b1220;">
             <legend style="font-size:11px;font-weight:700;color:#c4b5fd;">Détection LTE / NR</legend>
@@ -504,7 +512,7 @@
           <div id="radioExecutiveTop" style="margin:0 0 10px;padding:8px 10px;border:1px solid #334155;border-radius:6px;background:#0b1220;font-size:11px;color:#cbd5e1;"></div>
           <div id="radioMacroZones" style="margin:0 0 10px;padding:8px 10px;border:1px solid #334155;border-radius:6px;background:#0b1220;font-size:11px;color:#cbd5e1;"></div>
           <section id="radioTimeline" style="margin:0 0 10px;padding:10px;border:1px solid #334155;border-radius:6px;background:#0b1220;font-size:11px;color:#cbd5e1;"></section>
-          <div style="overflow:auto;border:1px solid #334155;border-radius:6px;"><table style="width:100%;min-width:1750px;border-collapse:collapse;font-size:12px;line-height:1.4;"><thead><tr style="background:#1e293b;color:#dbeafe;"><th style="padding:9px;text-align:left;">Décision</th><th style="padding:9px;">RAT / rang</th><th style="padding:9px;text-align:left;">Type</th><th style="padding:9px;text-align:left;">Début</th><th style="padding:9px;text-align:left;">Serving dominant</th><th style="padding:9px;">Bande / canal</th><th style="padding:9px;text-align:left;">Analyse Optim</th><th style="padding:9px;">Dominance</th><th style="padding:9px;">RSRP P50 / P10</th><th style="padding:9px;">SINR P50 / P10</th><th style="padding:9px;">MOS P50 / P10</th><th style="padding:9px;">Points</th><th style="padding:9px;">Distance</th></tr></thead><tbody id="radioDegradationRows"></tbody></table></div>
+          <div style="overflow:auto;border:1px solid #334155;border-radius:6px;"><table style="width:100%;min-width:1750px;border-collapse:collapse;font-size:12px;line-height:1.4;"><thead><tr style="background:#1e293b;color:#dbeafe;"><th style="padding:9px;text-align:left;">ID</th><th style="padding:9px;text-align:left;">Décision</th><th style="padding:9px;text-align:left;">Type</th><th style="padding:9px;text-align:left;">Début</th><th style="padding:9px;text-align:left;">Serving dominant</th><th style="padding:9px;">Bande / canal</th><th style="padding:9px;text-align:left;">Analyse Optim</th><th style="padding:9px;">Dominance</th><th style="padding:9px;">RSRP P50 / P10</th><th style="padding:9px;">SINR P50 / P10</th><th style="padding:9px;">MOS P50 / P10</th><th style="padding:9px;">Points</th><th style="padding:9px;">Distance</th></tr></thead><tbody id="radioDegradationRows"></tbody></table></div>
         </div>
       </div>`;
     document.body.appendChild(modal);
@@ -540,6 +548,10 @@
     const q = (id) => modal.querySelector(id);
     if (!report) return;
     const cards = report.cards || [];
+    try {
+      const nProf = (analysis.incidents || []).filter((item) => item && item.professional).length;
+      console.info("[COP summary]", `incidents=${(analysis.incidents || []).length} withProfessional=${nProf} cards=${cards.length}`);
+    } catch (_) {}
     q("#radioDegradationSummary").innerHTML = cards.map(([label, value]) => summaryCard(label, value, /Passage|Nombre/.test(label) ? "#fb7185" : /5G|NR/.test(label) ? "#a78bfa" : "#67e8f9")).join("");
     q("#radioProfessionalSummary").innerHTML = "";
     q("#radioProfessionalSummary").style.display = "none";
@@ -571,6 +583,8 @@
 
   const renderTimeline = (modal, analysis, selected) => {
     const host = modal.querySelector("#radioTimeline");
+    if (host) host.style.display = "none";
+    return;
     if (!host || !selected) { if (host) host.textContent = "Aucun incident à afficher sur la timeline."; return; }
     const parse = (value) => root.RadioRcaEngine?.timeMs?.(value) ?? Date.parse(value);
     const start = parse(selected.startTime) - 5000;
@@ -927,6 +941,107 @@
     }
   };
 
+  // COP: pre-detection popup — choose LTE/NR thresholds, then launch.
+  root.showRadioDetectionSetup = (logId) => {
+    const log = getLog(logId);
+    if (!log) return;
+    const previous = document.getElementById("radioDetectionSetupModal");
+    if (previous) previous.remove();
+    const defaults = root.RadioDegradationAnalyzer?.DEFAULT_PROFILES || {};
+    const num = (value, fallback) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const modal = document.createElement("div");
+    modal.id = "radioDetectionSetupModal";
+    modal.className = "modal";
+    modal.style.display = "block";
+    const field = (id, label, value, step) =>
+      `<label style="font-size:11px;color:#94a3b8;">${label}<input id="${id}" type="number" step="${step}" value="${value}" style="display:block;width:100%;margin-top:4px;box-sizing:border-box;padding:6px 7px;border:1px solid #475569;border-radius:4px;background:#111827;color:#f8fafc;"></label>`;
+    modal.innerHTML = `
+      <div class="modal-content glass-modal-content" style="max-width:420px;">
+        <div class="modal-header glass-modal-header">
+          <h3>Détection LTE / NR</h3>
+          <span class="close" data-setup-close style="cursor:pointer;">&times;</span>
+        </div>
+        <div class="modal-body glass-modal-body">
+          <p class="form-hint" style="margin-bottom:10px;">Seuils de détection automatique pour <b>${escapeHtml(log.name || "")}</b></p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            ${field("radioSetupLteRsrp", "LTE RSRP ≤ (dBm)", num(defaults.lte?.coverageEntryDbm, -105), "0.5")}
+            ${field("radioSetupLteSinr", "LTE SINR ≤ (dB)", num(defaults.lte?.sinrEntryDb, 0), "0.5")}
+            ${field("radioSetupNrRsrp", "NR RSRP ≤ (dBm)", num(defaults.nr?.coverageEntryDbm, -105), "0.5")}
+            ${field("radioSetupNrSinr", "NR SINR ≤ (dB)", num(defaults.nr?.sinrEntryDb, 0), "0.5")}
+            ${field("radioSetupMos", "MOS < (seuil)", 3.5, "0.1")}
+            ${field("radioSetupMinPoints", "Points dégradés min.", num(defaults.lte?.minDegradedSnapshots, 5), "1")}
+          </div>
+          <div id="radioSetupStatus" style="font-size:11px;color:#94a3b8;margin-top:10px;"></div>
+          <div class="editor-footer" style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end;">
+            <button class="btn" data-setup-close>Annuler</button>
+            <button class="btn btn-green" data-setup-launch>Lancer la détection</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    // Moveable popup (drag by header).
+    try {
+      const dragHeader = modal.querySelector(".modal-header");
+      const dragContent = modal.querySelector(".modal-content");
+      if (dragHeader && dragContent && typeof window.makeElementDraggable === "function") {
+        window.makeElementDraggable(dragHeader, dragContent);
+      }
+    } catch (_) {}
+    modal.querySelectorAll("[data-setup-close]").forEach((btn) => {
+      btn.onclick = () => modal.remove();
+    });
+    modal.querySelector("[data-setup-launch]").onclick = async () => {
+      const val = (id) => modal.querySelector("#" + id).value;
+      const min = Math.max(1, Number(val("radioSetupMinPoints")) || 5);
+      const status = modal.querySelector("#radioSetupStatus");
+      const launchBtn = modal.querySelector("[data-setup-launch]");
+      const tracker = window.ProgressTracker;
+      const frame = () => new Promise((resolve) => setTimeout(resolve, 40));
+      if (status) status.textContent = "Détection en cours…";
+      if (launchBtn) launchBtn.disabled = true;
+      try {
+        tracker?.show("Détection automatique radio", log.name || "");
+        tracker?.update(6, "Lecture des points…");
+        await frame();
+        const previousAnalysis = log.radioDegradationAnalysis;
+        tracker?.update(20, "Snapshots radio…");
+        await frame();
+        const next = root.RadioDegradationAnalyzer.analyze(log.points, { profiles: {
+          lte: { coverageEntryDbm: val("radioSetupLteRsrp"), sinrEntryDb: val("radioSetupLteSinr"), minDegradedSnapshots: min },
+          nr: { coverageEntryDbm: val("radioSetupNrRsrp"), sinrEntryDb: val("radioSetupNrSinr"), minDegradedSnapshots: min },
+          mos: { degraded: Number(val("radioSetupMos")) || 3.5 },
+        } });
+        tracker?.update(55, `Incidents détectés : ${(next.summary?.lteCandidates || 0) + (next.summary?.nrCandidates || 0)} radio, ${next.summary?.mosCandidates || 0} MOS…`);
+        await frame();
+        preserveReviewStates(previousAnalysis, next);
+        next.viewFilters = { ...(previousAnalysis?.viewFilters || {}), minPoints: min };
+        log.radioDegradationAnalysis = next;
+        try {
+          const s = next.summary || {};
+          console.info("[COP detection]", `incidents=${(next.incidents || []).length}`,
+            `LTE=${s.lteCandidates} NR=${s.nrCandidates} MOS=${s.mosCandidates} TPUT=${s.throughputCandidates} MOB=${s.mobilityCandidates}`,
+            `stationary=${(s.lteStationaryFindings || 0) + (s.nrStationaryFindings || 0)}`);
+        } catch (_) {}
+        enrichServingNamesFromBdd(next);
+        refreshCampaignRecurrence();
+        tracker?.update(80, "Rapport professionnel…");
+        await frame();
+        applyProfessionalReport(log, exportMetaFor(log));
+        root.updateLogsList?.();
+        modal.remove();
+        await tracker?.complete("Détection terminée");
+        root.showRadioDegradationAnalysis(log.id);
+      } catch (error) {
+        tracker?.hide();
+        if (status) status.textContent = "Échec de la détection : " + (error?.message || error);
+        if (launchBtn) launchBtn.disabled = false;
+      }
+    };
+  };
+
   root.showRadioDegradationAnalysis = (logId) => {
     const log = getLog(logId);
     if (!log || !root.RadioDegradationAnalyzer) return;
@@ -1007,6 +1122,10 @@
         }
       } catch (_) {}
       renderTimeline(modal, analysis, rows[0]);
+      const incidentShortId = (it) => {
+        const idx = (analysis.incidents || []).indexOf(it);
+        return "D" + String(idx + 1).padStart(3, "0");
+      };
       q("#radioDegradationRows").innerHTML = rows.map((item) => {
         const professional = professionalFor(item) || {};
         const decision = item.reviewState || "candidate";
@@ -1033,9 +1152,12 @@
         const coexistenceDetail = item.crossRatCoexistence?.length
           ? `<div style="margin-top:5px;color:#67e8f9;">LTE + NR simultanés : ${item.crossRatCoexistence.length} portion(s) ; chaque couche conserve sa RCA propre.</div>` : "";
         const actionStyle = (state, background) => `padding:3px 5px;border:1px solid ${decision === state ? "#f8fafc" : "transparent"};border-radius:4px;background:${background};color:#fff;font-size:10px;cursor:pointer;`;
-        return `<tr data-radio-id="${escapeHtml(item.id)}" style="cursor:pointer;border-top:1px solid #263244;">
-          <td style="padding:8px;white-space:nowrap;"><button data-decision="validated" style="${actionStyle("validated", "#15803d")}">Valider</button> <button data-decision="rejected" style="${actionStyle("rejected", "#b91c1c")}">Rejeter</button> <button data-decision="investigate" style="${actionStyle("investigate", "#a16207")}">À investiguer</button></td>
-          <td style="padding:8px;text-align:center;"><span style="display:inline-block;padding:2px 7px;border-radius:999px;background:${color};color:#0f172a;font-weight:800;opacity:.82;">${escapeHtml(item.rat)} #${item.rank}</span><div style="font-size:10px;color:${item.stationary ? "#94a3b8" : "#fbbf24"};margin-top:3px;">${escapeHtml(priority)}</div></td>
+        const isSelRow = item.id === selectedRadioRowId;
+        const isValRow = item.reviewState === "validated";
+        const rowHi = isSelRow ? "background:rgba(59,130,246,0.22);box-shadow:inset 3px 0 0 #3b82f6;" : (isValRow ? "background:rgba(21,128,61,0.20);box-shadow:inset 3px 0 0 #22c55e;" : "");
+        return `<tr data-radio-id="${escapeHtml(item.id)}" style="cursor:pointer;border-top:1px solid #263244;${rowHi}">
+          <td style="padding:8px;white-space:nowrap;font-weight:700;color:#93c5fd;">${escapeHtml(incidentShortId(item))}</td>
+          <td style="padding:8px;white-space:nowrap;"><button data-decision="validated" style="${actionStyle("validated", "#15803d")}">Valider</button></td>
           <td style="padding:8px;color:${color};font-weight:700;">${escapeHtml(professional.issueFrenchLabel || typeLabel(item.type))}<div style="font-size:10px;color:#94a3b8;margin-top:3px;">${escapeHtml(professional.severity || "Dégradation radio")}${item.stationary ? " · Stationnaire / faible mobilité" : ""}</div></td>
           <td style="padding:8px;white-space:nowrap;">${escapeHtml(item.startTime || "—")}</td>
           <td style="padding:8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(professional.servingCell || item.dominantServing?.cellName || "")}">${escapeHtml(professional.servingCell || item.dominantServing?.cellName || "Non résolu")}<div style="font-size:10px;color:#94a3b8;">${escapeHtml(professional.servingRole || item.dominantServing?.role || "Serving")}${item.dominantServing?.nameSource === "bdd" ? " · BDD (PCI/freq/proximité)" : " · source DT"}</div></td>
@@ -1047,7 +1169,7 @@
           <td style="padding:8px;text-align:right;white-space:nowrap;">${number(item.mos?.median, 2)} / ${number(item.mos?.p10, 2)}</td>
           <td style="padding:8px;text-align:right;font-weight:800;">${item.sampleCount}</td><td style="padding:8px;text-align:right;">${Math.round(item.distanceM || 0)} m</td>
         </tr>`;
-      }).join("") || '<tr><td colspan="13" style="padding:18px;text-align:center;color:#94a3b8;">Aucun segment ne correspond aux filtres actuels.</td></tr>';
+      }).join("") || '<tr><td colspan="14" style="padding:18px;text-align:center;color:#94a3b8;">Aucun segment ne correspond aux filtres actuels.</td></tr>';
       q("#radioDegradationRows").querySelectorAll("tr[data-radio-id]").forEach((row) => {
         const incident = analysisRows(log).find((item) => item.id === row.dataset.radioId);
         row.onclick = (event) => {
@@ -1081,12 +1203,20 @@
           }
           const decisionButton = event.target?.closest("button[data-decision]");
           if (decisionButton && incident) {
-            incident.reviewState = decisionButton.dataset.decision;
+            incident.reviewState = incident.reviewState === "validated" ? "candidate" : "validated";
             updateApprovalStatus(log, modal);
             renderRows();
             return;
           }
           if (incident) {
+            selectedRadioRowId = incident.id;
+            const tbodyEl = row.closest("tbody");
+            if (tbodyEl) {
+              tbodyEl.querySelectorAll("tr[data-radio-id]").forEach((other) => {
+                const otherInc = analysisRows(log).find((x) => x.id === other.dataset.radioId);
+                paintRadioRowState(other, otherInc);
+              });
+            }
             renderTimeline(modal, analysis, incident);
             focusRow(log, incident);
             root.requestAnimationFrame?.(() => arrangeReviewLayout(modal));
@@ -1124,6 +1254,23 @@
       minPointsInput.addEventListener("input", () => {
         if (minPointsTimer) clearTimeout(minPointsTimer);
         minPointsTimer = setTimeout(refreshFilters, 350);
+      });
+    }
+    // Detection "Points dégradés min." drives the display "Min. points" filter.
+    const detMinPointsInput = q("#radioMinPoints");
+    if (detMinPointsInput) {
+      let detMinTimer = null;
+      const syncDetMinToFilter = () => {
+        const target = q("#radioFilterMinPoints");
+        if (target && target.value !== detMinPointsInput.value) {
+          target.value = detMinPointsInput.value;
+          refreshFilters();
+        }
+      };
+      detMinPointsInput.addEventListener("change", syncDetMinToFilter);
+      detMinPointsInput.addEventListener("input", () => {
+        if (detMinTimer) clearTimeout(detMinTimer);
+        detMinTimer = setTimeout(syncDetMinToFilter, 400);
       });
     }
     q("#radioShowMap").onclick = () => { refreshFilters(); showRadioSegmentsOnMap(log); };

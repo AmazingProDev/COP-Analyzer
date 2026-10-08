@@ -8,16 +8,15 @@
 
   const STAT_HEADERS = [
     "Année", "Semaine", "Date", "Parcours", "Type_parcours",
-    "DATA Couverture", "DATA Qualité", "DATA HO", "DATA D_1", "DATA D_2",
-    "DATA D_5", "DATA D_10", "DATA D_Max", "DATA D_Moy", "DATA Cellules", "DATA HO_3G",
-    "VoLTE Coupures", "VoLTE Echecs", "VoLTE Couverture", "VoLTE Qualité",
-    "VoLTE HO", "VoLTE MOS", "VoLTE Cellules", "VoLTE HO_3G",
-    "VOIX Auto Coupures", "VOIX Auto Echecs", "VOIX Auto Couverture", "VOIX Auto Qualité",
-    "VOIX Auto HO", "VOIX Auto MOS", "VOIX Auto Cellules", "VOIX Auto HO_2G",
+    "Nbr coupure", "Nbr echecs", "Nbr de dégradation",
+    "% bonne couverture", "% bonne qualité", "% bon MOS",
+    "Nbr Cellules serveuse",
+    "%5G", "%4G", "%TDD",
+    "%nr700", "%nr2100", "%L1800", "%L2100", "%L2600", "%L800",
     "Durée", "Km", "Heure_D", "Heure_F",
   ];
   const ANALYSIS_HEADERS = [
-    "Année", "Semaine", "Date_parcours", "Parcours", "Type_Test", "Problème",
+    "ID", "Année", "Semaine", "Date_parcours", "Parcours", "Type_Test", "Problème",
     "Occurence", "Analyse Optim", "LAC", "CID", "Nom_Cellule", "Niveau", "Qualité",
     "Action", "Type_Action", "Etat_Action", "Responsabilité", "X", "Y",
     "CGPS_Debut_X", "CGPS_Debut_Y", "CGPS_Fin_X", "CGPS_Fin_Y", "Trace_CGPS", "LogFile",
@@ -180,23 +179,85 @@
     const durationMs = finite(last.timeMs) !== null && finite(first.timeMs) !== null && last.timeMs >= first.timeMs
       ? last.timeMs - first.timeMs : null;
     const stat = Object.fromEntries(STAT_HEADERS.map((header) => [header, null]));
+    // Presence shares over ALL serving snapshots (EN-DC/TDD overlaps allowed).
+    // Missing measurements are skipped; out-of-scope RATs count as absent.
+    const nStream = stream.length;
+    const share = (test) => {
+      if (!nStream) return null;
+      let hit = 0, total = 0;
+      for (const item of stream) {
+        const value = test(item);
+        if (value === null || value === undefined) continue;
+        total++;
+        if (value) hit++;
+      }
+      return total ? Math.round((hit / total) * 10000) / 100 : null;
+    };
+    const shareAll = (test) => {
+      if (!nStream) return null;
+      let hit = 0;
+      for (const item of stream) {
+        if (test(item)) hit++;
+      }
+      return Math.round((hit / nStream) * 10000) / 100;
+    };
+    const lteBandOf = (channel) => {
+      if (channel === null || channel === undefined) return null;
+      const v = Number(channel);
+      if (!Number.isFinite(v)) return null;
+      if (v >= 1200 && v <= 1949) return "L1800";
+      if (v >= 300 && v <= 699) return "L2100";
+      if ((v >= 2400 && v <= 2700) || (v >= 2750 && v <= 3449) || (v >= 3400 && v <= 3799)) return "L2600";
+      if (v >= 6150 && v <= 6449) return "L800";
+      return null;
+    };
+    const nrBandOf = (channel) => {
+      if (channel === null || channel === undefined) return null;
+      const v = Number(channel);
+      if (!Number.isFinite(v)) return null;
+      if (v >= 151600 && v <= 160600) return "nr700";
+      if (v >= 422000 && v <= 440000) return "nr2100";
+      return null;
+    };
+    const isTdd = (item) => {
+      if (/tdd/i.test(String(item.band || ""))) return true;
+      if (String(item.rat || "").toUpperCase() === "NR") {
+        const v = Number(item.channel);
+        return Number.isFinite(v) && ((v >= 499200 && v <= 537999) || (v >= 620000 && v <= 680000) ||
+          (v >= 37750 && v <= 38249) || (v >= 38650 && v <= 39649) || (v >= 39650 && v <= 41589));
+      }
+      const v = Number(item.channel);
+      return Number.isFinite(v) && ((v >= 37750 && v <= 38249) || (v >= 38650 && v <= 39649) || (v >= 39650 && v <= 41589));
+    };
+    const mosSnaps = Array.isArray(analysis.mosSnapshots) ? analysis.mosSnapshots : [];
+    const mosValues = mosSnaps.map((item) => finite(item?.mos)).filter((value) => value !== null);
+    const voiceSummary = log?.voiceAnalysis?.summary || {};
     Object.assign(stat, {
       "Année": year, "Semaine": week, "Date": dtDate || null,
       "Parcours": parcours, "Type_parcours": meta.testType || "Drive Test 4G/5G",
-      "DATA Couverture": measuredPercent(stream, "rsrp", (item) => finite(profileFor(item)?.coverageEntryDbm) ?? -105),
-      "DATA Qualité": measuredPercent(stream, "sinr", (item) => finite(profileFor(item)?.sinrEntryDb) ?? 0),
-      "DATA D_1": percent(dl.filter((value) => value >= 1).length, dl.length),
-      "DATA D_2": percent(dl.filter((value) => value >= 2).length, dl.length),
-      "DATA D_5": percent(dl.filter((value) => value >= 5).length, dl.length),
-      "DATA D_10": percent(dl.filter((value) => value >= 10).length, dl.length),
-      "DATA D_Max": dl.length ? round(dl.reduce((max, value) => Math.max(max, value), 0), 2) : null,
-      "DATA D_Moy": dl.length ? round(dl.reduce((sum, value) => sum + value, 0) / dl.length, 2) : null,
-      "DATA Cellules": stream.length ? new Set(stream.map((item) => item.cellKey || `${item.rat}|${item.pci}|${item.channel}`)).size : null,
+      "Nbr coupure": finite(voiceSummary.drops) ?? 0,
+      "Nbr echecs": finite(voiceSummary.failures) ?? 0,
+      "Nbr de dégradation": (analysis.incidents || []).filter((item) => !item?.stationary).length,
+      "% bonne couverture": share((item) => { const v = finite(item?.rsrp); return v === null ? null : v > -115; }),
+      "% bonne qualité": share((item) => { const v = finite(item?.sinr); return v === null ? null : v > 0; }),
+      "% bon MOS": mosValues.length ? Math.round((mosValues.filter((value) => value > 2.2).length / mosValues.length) * 10000) / 100 : null,
+      "Nbr Cellules serveuse": nStream ? new Set(stream.map((item) => item.cellKey || `${item.rat}|${item.pci}|${item.channel}`)).size : null,
+      "%5G": shareAll((item) => String(item?.rat || "").toUpperCase() === "NR"),
+      "%4G": shareAll((item) => { const r = String(item?.rat || "").toUpperCase(); return !!r && r !== "NR"; }),
+      "%TDD": shareAll((item) => isTdd(item)),
+      "%nr700": shareAll((item) => String(item?.rat || "").toUpperCase() === "NR" && nrBandOf(item?.channel) === "nr700"),
+      "%nr2100": shareAll((item) => String(item?.rat || "").toUpperCase() === "NR" && nrBandOf(item?.channel) === "nr2100"),
+      "%L1800": shareAll((item) => String(item?.rat || "").toUpperCase() !== "NR" && !!String(item?.rat || "") && lteBandOf(item?.channel) === "L1800"),
+      "%L2100": shareAll((item) => String(item?.rat || "").toUpperCase() !== "NR" && !!String(item?.rat || "") && lteBandOf(item?.channel) === "L2100"),
+      "%L2600": shareAll((item) => String(item?.rat || "").toUpperCase() !== "NR" && !!String(item?.rat || "") && lteBandOf(item?.channel) === "L2600"),
+      "%L800": shareAll((item) => String(item?.rat || "").toUpperCase() !== "NR" && !!String(item?.rat || "") && lteBandOf(item?.channel) === "L800"),
       "Durée": durationMs === null ? null : round(durationMs / 60000, 2),
       "Km": distanceKm(stream, analyzer), "Heure_D": timePart(first.time) || null,
       "Heure_F": timePart(last.time) || null,
     });
-    const analysisRows = (analysis.incidents || []).filter((item) => item.reviewState !== "rejected")
+    const eligibleIncidents = (analysis.incidents || []).filter((item) => item.reviewState !== "rejected");
+    const incidentShortId = (item) => "D" + String((analysis.incidents || []).indexOf(item) + 1).padStart(3, "0");
+    const analysisRows = eligibleIncidents
       .map((item) => {
         const professional = item.professional || {};
         const serving = item.dominantServing || item.representative || {};
@@ -212,6 +273,7 @@
           String(professional.shortDiagnostic || "").replace(/\n/g, " ").trim() ||
           "Analyse Optim non calculée.";
         return {
+          "ID": incidentShortId(item),
           "Année": incidentDate ? Number(incidentDate.slice(0, 4)) : null,
           "Semaine": isoWeek(incidentDate), "Date_parcours": incidentDate || null,
           "Parcours": parcours, "Type_Test": meta.testType || "Radio 4G/5G",
@@ -239,20 +301,24 @@
       statistiquesRows: [stat],
       analyseHeaders: ANALYSIS_HEADERS,
       analyseRows: analysisRows,
+      validerHeaders: ANALYSIS_HEADERS,
+      validerRows: analysisRows.filter((_, idx) => eligibleIncidents[idx] && eligibleIncidents[idx].reviewState === "validated"),
     };
   };
 
   const buildFallbackWorkbook = (xlsx, payload) => {
     const workbook = xlsx.utils.book_new();
-    const makeSheet = (headers, rows) => {
+    const makeSheet = (headers, rows, hidden) => {
       const grid = [headers, ...rows.map((row) => headers.map((header) => safeCell(row[header]) ?? null))];
       const sheet = xlsx.utils.aoa_to_sheet(grid, { cellDates: true });
-      sheet["!cols"] = headers.map((header) => ({ wch: /Analyse Optim|Action|LogFile/.test(header) ? 65 : /Parcours|Nom_Cellule/.test(header) ? 38 : 16 }));
+      sheet["!cols"] = headers.map((header, ci) => ({ wch: /Analyse Optim|Action|LogFile/.test(header) ? 65 : /Parcours|Nom_Cellule/.test(header) ? 38 : 16, hidden: (hidden || []).includes(ci) || undefined }));
       sheet["!autofilter"] = { ref: sheet["!ref"] };
       return sheet;
     };
-    xlsx.utils.book_append_sheet(workbook, makeSheet(payload.statistiquesHeaders, payload.statistiquesRows), "Statistiques");
-    xlsx.utils.book_append_sheet(workbook, makeSheet(payload.analyseHeaders, payload.analyseRows), "Analyse");
+    const hiddenAnalyse = [26, 27, 28, 29, 30, 31];
+    xlsx.utils.book_append_sheet(workbook, makeSheet(payload.statistiquesHeaders, payload.statistiquesRows, []), "Statistiques");
+    xlsx.utils.book_append_sheet(workbook, makeSheet(payload.analyseHeaders, payload.analyseRows, hiddenAnalyse), "Analyse");
+    xlsx.utils.book_append_sheet(workbook, makeSheet(payload.validerHeaders || payload.analyseHeaders, payload.validerRows || [], hiddenAnalyse), "Valider");
     return workbook;
   };
 
@@ -280,8 +346,9 @@
       '</Styles>',
     ];
     const sheets = [
-      { name: "Statistiques", headers: payload.statistiquesHeaders, rows: payload.statistiquesRows },
-      { name: "Analyse", headers: payload.analyseHeaders, rows: payload.analyseRows },
+      { name: "Statistiques", headers: payload.statistiquesHeaders, rows: payload.statistiquesRows, hidden: [] },
+      { name: "Analyse", headers: payload.analyseHeaders, rows: payload.analyseRows, hidden: [26, 27, 28, 29, 30, 31] },
+      { name: "Valider", headers: payload.validerHeaders || payload.analyseHeaders, rows: payload.validerRows || [], hidden: [26, 27, 28, 29, 30, 31] },
     ];
     for (const sheet of sheets) {
       const nCols = sheet.headers.length;
@@ -296,7 +363,10 @@
         return Math.max(12, Math.min(/Analyse Optim/.test(header) ? 80 : 42, mx));
       });
       parts.push(`<Worksheet ss:Name="${xmlEscape(sheet.name)}"><Table>`);
-      widths.forEach((wch) => parts.push(`<Column ss:Width="${Math.round(wch * 6.5)}"/>`));
+      widths.forEach((wch, ci) => {
+        const hidden = (sheet.hidden || []).includes(ci) ? ' ss:Hidden="1"' : "";
+        parts.push(`<Column ss:Width="${Math.round(wch * 6.5)}"${hidden}/>`);
+      });
       parts.push('<Row ss:Height="30">');
       sheet.headers.forEach((header) => parts.push(`<Cell ss:StyleID="hdr"><Data ss:Type="String">${xmlEscape(header)}</Data></Cell>`));
       parts.push('</Row>');
