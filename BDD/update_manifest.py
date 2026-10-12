@@ -6,10 +6,10 @@ from pathlib import Path
 
 
 folder = Path(__file__).resolve().parent
-bdd = folder / "BDD_Mensuel_M08.xlsx"
+bdd = folder / "BDD_MensuelM9.xlsx"
 manifest = {
     "version": sha256(bdd.read_bytes()).hexdigest()[:16],
-    "bdd": "BDD/BDD_Mensuel_M08.xlsx",
+    "bdd": "BDD/BDD_MensuelM9.xlsx",
     "sarf": "BDD/SARF%20autoroute%20Rabat%20-%20Casa.xlsx",
 }
 (folder / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

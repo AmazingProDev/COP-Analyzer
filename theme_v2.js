@@ -12,13 +12,11 @@ window.themeConfig = {
             { min: 2.2, max: 3, color: '#eab308', label: 'Moyen (2,2 à < 3)' },
             { min: 0, max: 2.2, color: '#ef4444', label: 'Mauvaise (0 à < 2,2)' }
         ],
-        // RSRP (LTE & NR)
+        // RSRP (LTE & NR) — défaut: Bon > -105 / Moyen -115 à -105 / Mauvaise < -115
         rsrp: [
-            { min: -80, color: '#22c55e', label: 'Excellent ( > -80 )' },
-            { min: -90, max: -80, color: '#84cc16', label: 'Good ( -90 to -80 )' },
-            { min: -100, max: -90, color: '#eab308', label: 'Fair ( -100 to -90 )' },
-            { min: -110, max: -100, color: '#f97316', label: 'Poor ( -110 to -100 )' },
-            { max: -110, color: '#ef4444', label: 'Bad ( < -110 )' }
+            { min: -105, color: '#22c55e', label: 'Bon (> -105 dBm)' },
+            { min: -115, max: -105, color: '#eab308', label: 'Moyen (-115 à -105 dBm)' },
+            { max: -115, color: '#ef4444', label: 'Mauvaise (< -115 dBm)' }
         ],
         // RSRQ (LTE & NR)
         rsrq: [
@@ -27,12 +25,11 @@ window.themeConfig = {
             { min: -20, max: -15, color: '#f97316', label: 'Fair ( -20 to -15 )' },
             { max: -20, color: '#ef4444', label: 'Bad ( < -20 )' }
         ],
-        // SINR (LTE & NR)
+        // SINR (LTE & NR) — défaut: Bon > 5 / Moyen 0 à 5 / Mauvaise < 0
         sinr: [
-            { min: 20, color: '#22c55e', label: 'Excellent ( > 20 )' },
-            { min: 10, max: 20, color: '#84cc16', label: 'Good ( 10 to 20 )' },
-            { min: 0, max: 10, color: '#eab308', label: 'Fair ( 0 to 10 )' },
-            { max: 0, color: '#ef4444', label: 'Bad ( < 0 )' }
+            { min: 5, color: '#22c55e', label: 'Bon (> 5 dB)' },
+            { min: 0, max: 5, color: '#eab308', label: 'Moyen (0 à 5 dB)' },
+            { max: 0, color: '#ef4444', label: 'Mauvaise (< 0 dB)' }
         ],
         // CQI
         cqi: [
@@ -62,12 +59,11 @@ window.themeConfig = {
             { min: 70, minExclusive: true, color: '#ef4444', label: 'Bad (> 70%)' }
         ],
         // Legacy 'level' and 'quality' (mapping to rsrp/rsrq)
+        // 'level' suit le même défaut RSRP: Bon > -105 / Moyen -115 à -105 / Mauvaise < -115
         level: [
-            { min: -80, color: '#22c55e', label: 'Excellent ( > -80 )' },
-            { min: -90, max: -80, color: '#84cc16', label: 'Good ( -90 to -80 )' },
-            { min: -100, max: -90, color: '#eab308', label: 'Fair ( -100 to -90 )' },
-            { min: -110, max: -100, color: '#f97316', label: 'Poor ( -110 to -100 )' },
-            { max: -110, color: '#ef4444', label: 'Bad ( < -110 )' }
+            { min: -105, color: '#22c55e', label: 'Bon (> -105)' },
+            { min: -115, max: -105, color: '#eab308', label: 'Moyen (-115 à -105)' },
+            { max: -115, color: '#ef4444', label: 'Mauvaise (< -115)' }
         ],
         quality: [
             { min: -10, color: '#22c55e', label: 'Excellent ( > -10 )' },

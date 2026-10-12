@@ -19664,47 +19664,33 @@ document.addEventListener("DOMContentLoaded", () => {
       ],
       rsrp: [
         {
-          min: -70,
+          min: -105,
           max: undefined,
           color: "#22c55e",
-          label: "Excellent (>= -70 dBm)",
+          label: "Bon (> -105 dBm)",
         },
         {
-          min: -85,
-          max: -70,
-          color: "#84cc16",
-          label: "Good (-85 to -70 dBm)",
-        },
-        {
-          min: -95,
-          max: -85,
+          min: -115,
+          max: -105,
           color: "#eab308",
-          label: "Fair (-95 to -85 dBm)",
-        },
-        {
-          min: -105,
-          max: -95,
-          color: "#f97316",
-          label: "Poor (-105 to -95 dBm)",
+          label: "Moyen (-115 à -105 dBm)",
         },
         {
           min: undefined,
-          max: -105,
+          max: -115,
           color: "#ef4444",
-          label: "Bad (< -105 dBm)",
+          label: "Mauvaise (< -115 dBm)",
         },
       ],
       level: [
         {
-          min: -70,
+          min: -105,
           max: undefined,
           color: "#22c55e",
-          label: "Excellent (>= -70)",
+          label: "Bon (> -105)",
         }, // Green (34,197,94)
-        { min: -85, max: -70, color: "#84cc16", label: "Good (-85 to -70)" }, // Light Green (132,204,22)
-        { min: -95, max: -85, color: "#eab308", label: "Fair (-95 to -85)" }, // Yellow (234,179,8)
-        { min: -105, max: -95, color: "#f97316", label: "Poor (-105 to -95)" }, // Orange (249,115,22)
-        { min: undefined, max: -105, color: "#ef4444", label: "Bad (< -105)" }, // Red (239,68,68)
+        { min: -115, max: -105, color: "#eab308", label: "Moyen (-115 à -105)" }, // Yellow (234,179,8)
+        { min: undefined, max: -115, color: "#ef4444", label: "Mauvaise (< -115)" }, // Red (239,68,68)
       ],
       quality: [
         {
@@ -19779,15 +19765,13 @@ document.addEventListener("DOMContentLoaded", () => {
       ],
       sinr: [
         {
-          min: 20,
+          min: 5,
           max: undefined,
           color: "#22c55e",
-          label: "Excellent (>= 20 dB)",
+          label: "Bon (> 5 dB)",
         },
-        { min: 13, max: 20, color: "#84cc16", label: "Good (13 to 20 dB)" },
-        { min: 0, max: 13, color: "#eab308", label: "Fair (0 to 13 dB)" },
-        { min: -3, max: 0, color: "#f97316", label: "Poor (-3 to 0 dB)" },
-        { min: undefined, max: -3, color: "#ef4444", label: "Bad (< -3 dB)" },
+        { min: 0, max: 5, color: "#eab308", label: "Moyen (0 à 5 dB)" },
+        { min: undefined, max: 0, color: "#ef4444", label: "Mauvaise (< 0 dB)" },
       ],
       dl_throughput: [
         {
@@ -20025,34 +20009,22 @@ document.addEventListener("DOMContentLoaded", () => {
       // ── NR (5G) ──────────────────────────────────────────────────────────
       nr_ssrsrp: [
         {
-          min: -80,
+          min: -105,
           max: undefined,
           color: "#22c55e",
-          label: "Excellent (>= -80 dBm)",
+          label: "Bon (> -105 dBm)",
         },
         {
-          min: -90,
-          max: -80,
-          color: "#84cc16",
-          label: "Good (-90 to -80 dBm)",
-        },
-        {
-          min: -100,
-          max: -90,
+          min: -115,
+          max: -105,
           color: "#eab308",
-          label: "Fair (-100 to -90 dBm)",
-        },
-        {
-          min: -110,
-          max: -100,
-          color: "#f97316",
-          label: "Poor (-110 to -100 dBm)",
+          label: "Moyen (-115 à -105 dBm)",
         },
         {
           min: undefined,
-          max: -110,
+          max: -115,
           color: "#ef4444",
-          label: "Bad (< -110 dBm)",
+          label: "Mauvaise (< -115 dBm)",
         },
       ],
       nr_ssrsrq: [
@@ -20073,15 +20045,13 @@ document.addEventListener("DOMContentLoaded", () => {
       ],
       nr_sssinr: [
         {
-          min: 20,
+          min: 5,
           max: undefined,
           color: "#22c55e",
-          label: "Excellent (>= 20 dB)",
+          label: "Bon (> 5 dB)",
         },
-        { min: 13, max: 20, color: "#84cc16", label: "Good (13 to 20 dB)" },
-        { min: 0, max: 13, color: "#eab308", label: "Fair (0 to 13 dB)" },
-        { min: -3, max: 0, color: "#f97316", label: "Poor (-3 to 0 dB)" },
-        { min: undefined, max: -3, color: "#ef4444", label: "Bad (< -3 dB)" },
+        { min: 0, max: 5, color: "#eab308", label: "Moyen (0 à 5 dB)" },
+        { min: undefined, max: 0, color: "#ef4444", label: "Mauvaise (< 0 dB)" },
       ],
       dl_prb_pct: [
         { min: 0, max: 50, color: "#22c55e", label: "Good (< 50%)" },
@@ -20109,7 +20079,7 @@ document.addEventListener("DOMContentLoaded", () => {
   (() => {
     try {
       const saved = JSON.parse(
-        localStorage.getItem("optimThresholds") || "null",
+        localStorage.getItem("optimThresholdsV2") || "null",
       );
       if (saved && typeof saved === "object") {
         Object.entries(saved).forEach(([k, v]) => {
@@ -21265,7 +21235,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const smartCarePersistTheme = () => {
     try {
-      localStorage.setItem("optimThresholds", JSON.stringify(window.themeConfig && window.themeConfig.thresholds || {}));
+      localStorage.setItem("optimThresholdsV2", JSON.stringify(window.themeConfig && window.themeConfig.thresholds || {}));
     } catch (_err) {}
   };
 
@@ -21671,9 +21641,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const profile = smartCareThresholdProfile(smartCareActiveMetric());
     if (!profile) return;
     try {
-      const saved = JSON.parse(localStorage.getItem("optimThresholds") || "{}") || {};
+      const saved = JSON.parse(localStorage.getItem("optimThresholdsV2") || "{}") || {};
       delete saved[profile.key];
-      localStorage.setItem("optimThresholds", JSON.stringify(saved));
+      localStorage.setItem("optimThresholdsV2", JSON.stringify(saved));
     } catch (_err) {}
     // Defaults are defined while app.js starts, before persisted preferences
     // are merged.  A quick reload is the reliable way to restore that scale.
@@ -30156,7 +30126,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Persist threshold changes to localStorage
     try {
       localStorage.setItem(
-        "optimThresholds",
+        "optimThresholdsV2",
         JSON.stringify(window.themeConfig.thresholds),
       );
     } catch (_) {}
@@ -31342,7 +31312,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // Persist
       try {
         localStorage.setItem(
-          "optimThresholds",
+          "optimThresholdsV2",
           JSON.stringify(window.themeConfig.thresholds),
         );
       } catch (_) {}
@@ -85447,6 +85417,26 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     _renderBddLayers(sectors);
   }
 
+  async function _applyBddFromLocalCaches() {
+    // 1. IndexedDB — durable in-browser storage for both small and large BDDs.
+    try {
+      const indexedDbCached = await _loadBddSectorsIndexedDb();
+      if (indexedDbCached) {
+        _applyBddSectorsFromCache(indexedDbCached);
+        return true;
+      }
+    } catch (_) {
+      // Continue with the legacy cache and server snapshot.
+    }
+    // 2. localStorage — legacy cache for small BDDs.
+    const cached = _loadBddSectorsCache();
+    if (cached) {
+      _applyBddSectorsFromCache(cached);
+      return true;
+    }
+    return false;
+  }
+
   async function _loadBddOnStartup() {
     let bundle = null;
     try {
@@ -85463,7 +85453,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       try {
         const response = await fetch(bundle.bdd, { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        _parseBddFile(new File([await response.blob()], "BDD_Mensuel_M08.xlsx"), {
+        const bundleName = String(bundle.bdd || "").split("/").pop() || "BDD.xlsx";
+        _parseBddFile(new File([await response.blob()], bundleName), {
           bundleVersion: bundle.version,
         });
         return;
@@ -85471,22 +85462,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         console.error("[BDD] Bundled inventory unavailable:", error);
       }
     }
-    // 1. IndexedDB — durable in-browser storage for both small and large BDDs.
-    try {
-      const indexedDbCached = await _loadBddSectorsIndexedDb();
-      if (indexedDbCached) {
-        _applyBddSectorsFromCache(indexedDbCached);
-        return;
-      }
-    } catch (_) {
-      // Continue with the legacy cache and server snapshot.
-    }
-    // 2. localStorage — legacy cache for small BDDs.
-    const cached = _loadBddSectorsCache();
-    if (cached) {
-      _applyBddSectorsFromCache(cached);
-      return;
-    }
+    if (await _applyBddFromLocalCaches()) return;
     // 3. Durable server snapshot.  Use the API route so this also works through
     // the deployment proxy rather than relying on an ephemeral static file.
     fetch("/api/bdd/sectors", { cache: "no-store" })
@@ -85503,10 +85479,11 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
   // COP LITE: BDD (200k+ sectors) loads only after login so the landing
   // gate stays interactive; the event is dispatched by revealApp().
+  // The short delay lets the login transition paint before the fetch starts.
   if (window.COP_LITE) {
-    window.addEventListener("cop:authed", () => _loadBddOnStartup(), { once: true });
+    window.addEventListener("cop:authed", () => setTimeout(_loadBddOnStartup, 350), { once: true });
   } else {
-    _loadBddOnStartup();
+    setTimeout(_loadBddOnStartup, 350);
   }
 
   const bddUpdateInput = document.getElementById("bddUpdateInput");
@@ -85519,116 +85496,248 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     });
   }
 
+  // ── BDD workbook parsing (non-blocking) ────────────────────────────────
+  // The monthly inventory (~230k rows) used to be parsed synchronously on the
+  // main thread at startup, freezing the tab ("Page Unresponsive").  Parsing
+  // now runs in a Web Worker; a chunked main-thread parse is kept as an
+  // offline/file:// fallback.  Row mapping was validated byte-identical to
+  // the legacy gv() implementation over the full M9 workbook.
+  const _BDD_XLSX_CDN = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+  const _BDD_SHEET_CHUNK_ROWS = 15000;
+  // Column aliases per RAT — same contract as the legacy gv() lookups.
+  const _BDD_COLS = {
+    lat: ["latitude", "lat"],
+    lng: ["longitude", "long", "lon", "lng"],
+    az: ["azimut", "azimuth"],
+    "2G": { name: ["btsname", "site name", "sitename"], cell: ["cellname"], lac: ["lac"], freq: ["bcch"], ncc: ["ncc"], bcc: ["bcc"], rnc: ["bsc"], cid: ["cellid"] },
+    "3G": { name: ["nodebname", "site name", "sitename"], cell: ["cellname"], lac: ["lac"], freq: ["downlink uarfcn", "uarfcn"], pci: ["psc"], rnc: ["rncid", "rnc"], cid: ["cellid"] },
+    "4G": { name: ["basestationname", "site name", "sitename", "nodeb name"], cell: ["cellname"], tac: ["tracking area code", "tac"], freq: ["downlink earfcn", "earfcn"], pci: ["physical cell id", "phy cell id", "phycellid", "pci"], rnc: ["enb id", "enbid", "enodebid", "enb_id"], cid: ["cell id", "cellid"] },
+    "5G": { name: ["site name", "sitename", "gnb name", "gnbname", "gnodebfunctionname", "gnodebname", "base station name"], cell: ["cellname", "nrducellname", "nr du cell name", "ducellname"], tac: ["tac", "trackingareaid", "tracking area id"], freq: ["downlink narfcn", "narfcn", "arfcn"], pci: ["pci", "physical cell id", "phy cell id", "phycellid"], cid: ["cellid"] },
+  };
+  const _BDD_TECH_COLOR = { "2G": "#ef4444", "3G": "#eab308", "4G": "#3b82f6", "5G": "#a855f7" };
+  const _bddNormCol = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  function _bddHeaderIndex(header) {
+    const map = {};
+    (header || []).forEach((h, i) => {
+      const k = _bddNormCol(h);
+      if (k && map[k] === undefined) map[k] = i;
+    });
+    return map;
+  }
+
+  function _bddPick(arr, map, names) {
+    for (const nm of names) {
+      const idx = map[_bddNormCol(nm)];
+      if (idx !== undefined && idx < arr.length) return arr[idx];
+    }
+    return undefined;
+  }
+
+  function _bddWorkerSource() {
+    return (
+      "importScripts('" + _BDD_XLSX_CDN + "');\n" +
+      "var normSheet=function(n){return String(n||'').trim().toUpperCase().replace(/^BDD[\\s_-]*/,'');};\n" +
+      "self.onmessage=function(e){\n" +
+      "  try{\n" +
+      "    var wb=XLSX.read(e.data.buffer,{type:'array'});\n" +
+      "    var out=[];\n" +
+      "    for(var i=0;i<wb.SheetNames.length;i++){\n" +
+      "      var sn=wb.SheetNames[i];\n" +
+      "      var tech=normSheet(sn);\n" +
+      "      if(['2G','3G','4G','5G'].indexOf(tech)<0)continue;\n" +
+      "      var ws=wb.Sheets[sn];\n" +
+      "      if(!ws||!ws['!ref'])continue;\n" +
+      "      var ref=XLSX.utils.decode_range(ws['!ref']);\n" +
+      "      if(ref.e.r<1)continue;\n" +
+      "      var header=(XLSX.utils.sheet_to_json(ws,{header:1,range:{s:{r:0,c:0},e:{r:0,c:ref.e.c}},defval:''})[0])||[];\n" +
+      "      self.postMessage({type:'progress',sheet:tech});\n" +
+      "      var rows=XLSX.utils.sheet_to_json(ws,{header:1,range:{s:{r:1,c:0},e:{r:ref.e.r,c:ref.e.c}},defval:''});\n" +
+      "      out.push({tech:tech,header:header,rows:rows});\n" +
+      "    }\n" +
+      "    self.postMessage({type:'done',sheets:out});\n" +
+      "  }catch(err){self.postMessage({type:'error',error:String((err&&err.message)||err)});}\n" +
+      "};\n"
+    );
+  }
+
+  function _bddWorkbookToArraysWorker(arrayBuffer, onProgress) {
+    return new Promise((resolve, reject) => {
+      let worker = null;
+      try {
+        const blob = new Blob([_bddWorkerSource()], { type: "text/javascript" });
+        worker = new Worker(URL.createObjectURL(blob));
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+      const watchdog = setTimeout(() => {
+        try { worker.terminate(); } catch (_) {}
+        reject(new Error("BDD worker timeout"));
+      }, 180000);
+      worker.onmessage = (ev) => {
+        const data = (ev && ev.data) || {};
+        if (data.type === "progress") {
+          if (typeof onProgress === "function") { try { onProgress(data); } catch (_) {} }
+          return;
+        }
+        clearTimeout(watchdog);
+        try { worker.terminate(); } catch (_) {}
+        if (data.type === "done" && Array.isArray(data.sheets)) resolve(data.sheets);
+        else reject(new Error(data.error || "BDD worker failed"));
+      };
+      worker.onerror = (err) => {
+        clearTimeout(watchdog);
+        try { worker.terminate(); } catch (_) {}
+        reject(err instanceof Error ? err : new Error("BDD worker error"));
+      };
+      try {
+        worker.postMessage({ buffer: arrayBuffer }, [arrayBuffer]);
+      } catch (err) {
+        clearTimeout(watchdog);
+        try { worker.terminate(); } catch (_) {}
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  function _bddWorkbookToArraysMainThread(arrayBuffer) {
+    if (!window.XLSX) throw new Error("XLSX library unavailable");
+    const normSheet = (n) => String(n || "").trim().toUpperCase().replace(/^BDD[\s_-]*/, "");
+    const wb = window.XLSX.read(arrayBuffer, { type: "array" });
+    const sheets = [];
+    for (const sn of wb.SheetNames) {
+      const tech = normSheet(sn);
+      if (!["2G", "3G", "4G", "5G"].includes(tech)) continue;
+      const ws = wb.Sheets[sn];
+      if (!ws || !ws["!ref"]) continue;
+      const ref = window.XLSX.utils.decode_range(ws["!ref"]);
+      if (ref.e.r < 1) continue;
+      const header = (window.XLSX.utils.sheet_to_json(ws, { header: 1, range: { s: { r: 0, c: 0 }, e: { r: 0, c: ref.e.c } }, defval: "" })[0]) || [];
+      const rows = window.XLSX.utils.sheet_to_json(ws, { header: 1, range: { s: { r: 1, c: 0 }, e: { r: ref.e.r, c: ref.e.c } }, defval: "" });
+      sheets.push({ tech, header, rows });
+    }
+    return sheets;
+  }
+
+  // Chunked row→sector mapping with event-loop yields so the tab stays alive.
+  async function _bddSheetsToSectors(sheets, onProgress) {
+    const sectors = [];
+    for (const sheet of sheets || []) {
+      const tech = sheet.tech;
+      const cols = _BDD_COLS[tech];
+      if (!cols) continue;
+      const map = _bddHeaderIndex(sheet.header);
+      const rows = sheet.rows || [];
+      for (let start = 0; start < rows.length; start += _BDD_SHEET_CHUNK_ROWS) {
+        const end = Math.min(start + _BDD_SHEET_CHUNK_ROWS, rows.length);
+        for (let i = start; i < end; i++) {
+          const row = rows[i];
+          if (!Array.isArray(row)) continue;
+          const lat = parseFloat(_bddPick(row, map, _BDD_COLS.lat));
+          const lng = parseFloat(_bddPick(row, map, _BDD_COLS.lng));
+          if (isNaN(lat) || isNaN(lng)) continue;
+          const azimuth = parseFloat(_bddPick(row, map, _BDD_COLS.az)) || 0;
+          let name, cellName, lac, tac, freq, pci, rnc, cid;
+          if (tech === "2G") {
+            name = _bddPick(row, map, cols.name);
+            cellName = _bddPick(row, map, cols.cell);
+            lac = _bddPick(row, map, cols.lac);
+            freq = parseInt(_bddPick(row, map, cols.freq));
+            const ncc = parseInt(_bddPick(row, map, cols.ncc) || 0);
+            const bcc = parseInt(_bddPick(row, map, cols.bcc) || 0);
+            pci = !isNaN(ncc) && !isNaN(bcc) ? ncc * 8 + bcc : NaN;
+            rnc = _bddPick(row, map, cols.rnc);
+            cid = parseInt(_bddPick(row, map, cols.cid));
+          } else if (tech === "3G") {
+            name = _bddPick(row, map, cols.name);
+            cellName = _bddPick(row, map, cols.cell);
+            lac = _bddPick(row, map, cols.lac);
+            freq = parseInt(_bddPick(row, map, cols.freq));
+            pci = parseInt(_bddPick(row, map, cols.pci));
+            rnc = parseInt(_bddPick(row, map, cols.rnc));
+            cid = parseInt(_bddPick(row, map, cols.cid));
+          } else if (tech === "4G") {
+            name = _bddPick(row, map, cols.name);
+            cellName = _bddPick(row, map, cols.cell);
+            tac = _bddPick(row, map, cols.tac);
+            freq = parseInt(_bddPick(row, map, cols.freq));
+            pci = parseInt(_bddPick(row, map, cols.pci));
+            rnc = parseInt(_bddPick(row, map, cols.rnc));
+            cid = parseInt(_bddPick(row, map, cols.cid));
+          } else {
+            name = _bddPick(row, map, cols.name);
+            cellName = _bddPick(row, map, cols.cell);
+            tac = _bddPick(row, map, cols.tac);
+            freq = parseInt(_bddPick(row, map, cols.freq));
+            pci = parseInt(_bddPick(row, map, cols.pci));
+            cid = parseInt(_bddPick(row, map, cols.cid));
+          }
+          sectors.push({
+            lat,
+            lng,
+            azimuth,
+            name: String(name || ""),
+            siteName: String(name || ""),
+            cellName: String(cellName || ""),
+            cellId: String(cid != null && !isNaN(cid) ? cid : ""),
+            lac: lac != null ? lac : undefined,
+            tac: tac != null ? tac : undefined,
+            pci: isNaN(pci) ? undefined : pci,
+            sc: isNaN(pci) ? undefined : pci,
+            freq: isNaN(freq) ? undefined : freq,
+            tech,
+            color: _BDD_TECH_COLOR[tech],
+            rnc: isNaN(rnc) ? undefined : rnc,
+            cid: isNaN(cid) ? undefined : cid,
+          });
+        }
+        // Release the converted chunk source so peak memory stays bounded.
+        if (typeof onProgress === "function") { try { onProgress({ sheet: tech, done: end, total: rows.length }); } catch (_) {} }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      sheet.rows = [];
+    }
+    return sectors;
+  }
+
   function _parseBddFile(file, options = {}) {
     const statusEl = document.getElementById("bddStatusText");
     if (statusEl) statusEl.textContent = "BDD: loading...";
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
+      const sourceBuffer = ev.target.result;
+      // Let the UI paint before the heavy parse below.
+      await new Promise((resolve) => setTimeout(resolve, 60));
       try {
-        const wb = XLSX.read(ev.target.result, { type: "array" });
-        const normSheetName = (n) => String(n || "").trim().toUpperCase().replace(/^BDD[\s_-]*/, "");
-        const ratSheets = wb.SheetNames.filter((n) =>
-          /^(2G|3G|4G|5G)$/.test(normSheetName(n)),
-        );
-        if (ratSheets.length === 0) {
+        let sheets = null;
+        // 1) Web Worker: zero main-thread freeze. The buffer is transferred,
+        // so hand the worker a copy and keep the original for the fallback.
+        try {
+          if (typeof Worker !== "undefined" && sourceBuffer && typeof sourceBuffer.slice === "function") {
+            if (statusEl) statusEl.textContent = "BDD: lecture du fichier...";
+            sheets = await _bddWorkbookToArraysWorker(sourceBuffer.slice(0), (info) => {
+              if (statusEl && info && info.sheet) statusEl.textContent = "BDD: analyse " + info.sheet + "...";
+            });
+          }
+        } catch (workerErr) {
+          console.warn("[BDD] Worker parse unavailable, falling back to main thread:", workerErr);
+          sheets = null;
+        }
+        // 2) Main-thread fallback (XLSX.read itself still blocks briefly).
+        if (!sheets) {
+          if (statusEl) statusEl.textContent = "BDD: lecture du fichier...";
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          sheets = _bddWorkbookToArraysMainThread(sourceBuffer);
+        }
+        if (!sheets.length) {
           if (statusEl) statusEl.textContent = "BDD: no 2G/3G/4G/5G sheets found";
           return;
         }
-        const nc = (str) =>
-          String(str)
-            .toLowerCase()
-            .replace(/[^a-z0-9]/g, "");
-        const gv = (row, names) => {
-          const keys = Object.keys(row);
-          for (const nm of names) {
-            const t = nc(nm);
-            const k = keys.find((k) => nc(k) === t);
-            if (k !== undefined) return row[k];
-          }
-          return undefined;
-        };
-        const techColor = {
-          "2G": "#ef4444",
-          "3G": "#eab308",
-          "4G": "#3b82f6",
-          "5G": "#a855f7",
-        };
-        const allSectors = [];
-        for (const sheetName of wb.SheetNames) {
-          const sn = String(sheetName || "").trim().toUpperCase().replace(/^BDD[\s_-]*/, "");
-          if (!["2G", "3G", "4G", "5G"].includes(sn)) continue;
-          const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
-            defval: "",
-          });
-          for (const row of rows) {
-            const lat = parseFloat(gv(row, ["latitude", "lat"]));
-            const lng = parseFloat(
-              gv(row, ["longitude", "long", "lon", "lng"]),
-            );
-            if (isNaN(lat) || isNaN(lng)) continue;
-            const azimuth = parseFloat(gv(row, ["azimut", "azimuth"])) || 0;
-            let name, cellName, lac, tac, freq, pci, rnc, cid;
-            if (sn === "2G") {
-              name = gv(row, ["btsname", "site name", "sitename"]);
-              cellName = gv(row, ["cellname"]);
-              lac = gv(row, ["lac"]);
-              freq = parseInt(gv(row, ["bcch"]));
-              const ncc = parseInt(gv(row, ["ncc"]) || 0);
-              const bcc = parseInt(gv(row, ["bcc"]) || 0);
-              pci = !isNaN(ncc) && !isNaN(bcc) ? ncc * 8 + bcc : NaN;
-              rnc = gv(row, ["bsc"]);
-              cid = parseInt(gv(row, ["cellid"]));
-            } else if (sn === "3G") {
-              name = gv(row, ["nodebname", "site name", "sitename"]);
-              cellName = gv(row, ["cellname"]);
-              lac = gv(row, ["lac"]);
-              freq = parseInt(gv(row, ["downlink uarfcn", "uarfcn"]));
-              pci = parseInt(gv(row, ["psc"]));
-              rnc = parseInt(gv(row, ["rncid", "rnc"]));
-              cid = parseInt(gv(row, ["cellid"]));
-            } else if (sn === "4G") {
-              name = gv(row, [
-                "basestationname",
-                "site name",
-                "sitename",
-                "nodeb name",
-              ]);
-              cellName = gv(row, ["cellname"]);
-              tac = gv(row, ["tracking area code", "tac"]);
-              freq = parseInt(gv(row, ["downlink earfcn", "earfcn"]));
-              pci = parseInt(gv(row, ["physical cell id", "phy cell id", "phycellid", "pci"]));
-              rnc = parseInt(
-                gv(row, ["enb id", "enbid", "enodebid", "enb_id"]),
-              );
-              cid = parseInt(gv(row, ["cell id", "cellid"]));
-            } else {
-              name = gv(row, ["site name", "sitename", "gnb name"]);
-              cellName = gv(row, ["cellname", "nrducellname", "nr du cell name", "ducellname"]);
-              tac = gv(row, ["tac"]);
-              freq = parseInt(gv(row, ["downlink narfcn", "narfcn", "arfcn"]));
-              pci = parseInt(gv(row, ["pci", "physical cell id", "phy cell id", "phycellid"]));
-              cid = parseInt(gv(row, ["cellid"]));
-            }
-            allSectors.push({
-              lat,
-              lng,
-              azimuth,
-              name: String(name || ""),
-              siteName: String(name || ""),
-              cellName: String(cellName || ""),
-              cellId: String(cid != null && !isNaN(cid) ? cid : ""),
-              lac: lac != null ? lac : undefined,
-              tac: tac != null ? tac : undefined,
-              pci: isNaN(pci) ? undefined : pci,
-              sc: isNaN(pci) ? undefined : pci,
-              freq: isNaN(freq) ? undefined : freq,
-              tech: sn,
-              color: techColor[sn],
-              rnc: isNaN(rnc) ? undefined : rnc,
-              cid: isNaN(cid) ? undefined : cid,
-            });
-          }
-        }
+        if (statusEl) statusEl.textContent = "BDD: analyse...";
+        const allSectors = await _bddSheetsToSectors(sheets, (info) => {
+          if (statusEl && info && info.sheet) statusEl.textContent = "BDD: analyse " + info.sheet + " (" + info.done + "/" + info.total + ")...";
+        });
         if (allSectors.length > 0) {
           _applyBddSectors(allSectors, options);
         } else {
@@ -85637,7 +85746,15 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       } catch (err) {
         console.error("[BDD] parse error", err);
         if (statusEl)
-          statusEl.textContent = "BDD: parse error — " + err.message;
+          statusEl.textContent = "BDD: parse error — " + ((err && err.message) || err);
+        // A bundled auto-load failure must not leave the app without BDD:
+        // fall back to the last good browser snapshot.
+        if (options && options.bundleVersion) {
+          try {
+            const restored = await _applyBddFromLocalCaches();
+            if (restored && statusEl) statusEl.textContent += " (cache restauré)";
+          } catch (_) {}
+        }
       }
     };
     reader.readAsArrayBuffer(file);

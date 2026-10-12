@@ -510,7 +510,7 @@
           <fieldset style="display:grid;grid-template-columns:150px 170px minmax(210px,1fr) minmax(210px,1fr);gap:8px;align-items:end;margin:0 0 10px;padding:9px 10px;border:1px solid #334155;border-radius:6px;background:#0b1220;">
             <legend style="font-size:11px;font-weight:700;color:#86efac;">Export des dégradations validées</legend>
             <label style="font-size:11px;color:#94a3b8;">Date du parcours<input id="radioDegradationDate" type="date" style="display:block;width:100%;margin-top:4px;"></label>
-            <label style="font-size:11px;color:#94a3b8;">Type de test<input id="radioDegradationTestType" style="display:block;width:100%;margin-top:4px;"></label>
+            <label style="font-size:11px;color:#94a3b8;">Type de test<select id="radioDegradationTestType" style="display:block;width:100%;margin-top:4px;"><option>Voix libre Volte</option><option>Voix libre</option><option>Data libre</option><option>Whatsapp libre</option></select></label>
             <label style="font-size:11px;color:#94a3b8;">Nom de la plaque<input id="radioDegradationPlaque" placeholder="À renseigner" style="display:block;width:100%;margin-top:4px;"></label>
             <label style="font-size:11px;color:#94a3b8;">Nom du logfile<input id="radioDegradationLogfile" style="display:block;width:100%;margin-top:4px;"></label>
             <span id="radioApprovalStatus" style="grid-column:1/-1;font-size:11px;color:#94a3b8;">Validez une ou plusieurs dégradations pour alimenter la feuille « Synthèse incidents ».</span>
@@ -639,9 +639,11 @@
       track("Début / fin zone", incidentMarkers);
   };
 
+  const RADIO_TEST_TYPE_CHOICES = ["Voix libre Volte", "Voix libre", "Data libre", "Whatsapp libre"];
+  const RADIO_TEST_TYPE_DEFAULT = RADIO_TEST_TYPE_CHOICES[0];
   const defaultRadioExportMeta = (log) => ({
     date: String(analysisRows(log)[0]?.startTime || "").match(/^\d{4}-\d{2}-\d{2}/)?.[0] || "",
-    testType: "Radio 4G/5G",
+    testType: RADIO_TEST_TYPE_DEFAULT,
     plaque: "",
     logfile: String(log?.name || "Export radio").trim(),
   });
@@ -659,7 +661,7 @@
     const plaque = q("#radioDegradationPlaque");
     const logfile = q("#radioDegradationLogfile");
     if (date) meta.date = date.value || "";
-    if (testType) meta.testType = testType.value.trim() || "Radio 4G/5G";
+    if (testType) meta.testType = (testType.value || "").trim() || RADIO_TEST_TYPE_DEFAULT;
     if (plaque) meta.plaque = plaque.value.trim() || "";
     if (logfile) meta.logfile = logfile.value.trim() || String(log?.name || "Export radio");
     return meta;
@@ -1101,7 +1103,14 @@
     q("#radioFilterMinPoints").value = filters.minPoints;
     q("#radioFilterTop").value = filters.top;
     q("#radioDegradationDate").value = exportMeta.date || "";
-    q("#radioDegradationTestType").value = exportMeta.testType || "Radio 4G/5G";
+    const testTypeSelect = q("#radioDegradationTestType");
+    const savedTestType = exportMeta.testType || RADIO_TEST_TYPE_DEFAULT;
+    if (testTypeSelect && ![...testTypeSelect.options].some((o) => o.value === savedTestType)) {
+      const legacy = document.createElement("option");
+      legacy.textContent = savedTestType;
+      testTypeSelect.appendChild(legacy);
+    }
+    if (testTypeSelect) testTypeSelect.value = savedTestType;
     q("#radioDegradationPlaque").value = exportMeta.plaque || "";
     q("#radioDegradationLogfile").value = exportMeta.logfile || log.name || "";
     const enrichment = analysis.servingNameEnrichment || {};
