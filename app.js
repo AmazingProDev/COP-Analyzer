@@ -20898,9 +20898,21 @@ document.addEventListener("DOMContentLoaded", () => {
         alert("Log data not found.");
         return;
       }
+      let exportPoints = log.points;
+      let zoneSuffix = "";
+      try {
+        if (typeof window.filterDtPointsByExportZone === "function" && typeof window.getActiveExportPolygons === "function") {
+          const zones = window.getActiveExportPolygons();
+          if (zones && zones.length) {
+            const filtered = window.filterDtPointsByExportZone(log.points);
+            if (filtered && filtered.length) { exportPoints = filtered; zoneSuffix = "_zone"; }
+            else { alert("Aucun point dans la zone sélectionnée."); return; }
+          }
+        }
+      } catch (e) { exportPoints = log.points; }
       const kml = renderer.exportToKML(
         renderer.activeLogId,
-        log.points,
+        exportPoints,
         renderer.activeMetric,
       );
       if (!kml) {
@@ -20913,7 +20925,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = log.name + "_" + renderer.activeMetric + ".kml";
+      a.download = log.name + "_" + renderer.activeMetric + zoneSuffix + ".kml";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -21003,8 +21015,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (!items.length) {
       box.innerHTML = '<div style="padding:6px 8px; color:#999;">Aucune couche DT active. Affichez RSRP / SINR sur la carte d\'abord.</div>';
+      if (typeof window.updateDtKmlZoneStatus === "function") { try { window.updateDtKmlZoneStatus(); } catch (e) {} }
       return;
     }
+    const limitActive = (() => { const b = document.getElementById("dtKmlLimitZone"); return b ? b.checked : true; })();
     items.forEach((it) => {
       const row = document.createElement("label");
       row.style.cssText = "display:flex; align-items:center; gap:8px; padding:5px 6px; border-bottom:1px solid #333; cursor:pointer;";
@@ -21019,13 +21033,137 @@ document.addEventListener("DOMContentLoaded", () => {
       span.title = it.title;
       const count = document.createElement("span");
       count.style.cssText = "color:#888; font-size:11px;";
-      count.textContent = (it.points ? it.points.length : 0) + " pts";
+      let countTxt = (it.points ? it.points.length : 0) + " pts";
+      try {
+        if (limitActive && typeof window.filterDtPointsByExportZone === "function" && window.getActiveExportPolygons().length) {
+          const inside = window.filterDtPointsByExportZone(it.points || []).length;
+          countTxt = inside + " / " + (it.points ? it.points.length : 0) + " pts (zone)";
+        }
+      } catch (e) {}
+      count.textContent = countTxt;
       row.appendChild(cb);
       row.appendChild(span);
       row.appendChild(count);
       box.appendChild(row);
     });
+    if (typeof window.updateDtKmlZoneStatus === "function") { try { window.updateDtKmlZoneStatus(); } catch (e) {} }
   };
+  // ---- Zone d'export KML : tracer une zone, n'exporter que l'intérieur ----
+  if (!Array.isArray(window.exportPolygons)) window.exportPolygons = [];
+  window.getActiveExportPolygons = () => {
+    if (Array.isArray(window.exportPolygons) && window.exportPolygons.length) return window.exportPolygons;
+    if (window.filterActive && Array.isArray(window.filterPolygons) && window.filterPolygons.length) return window.filterPolygons;
+    if (window.filterPolygon) return [window.filterPolygon];
+    return [];
+  };
+  window.filterDtPointsByExportZone = (points) => {
+    const limitBox = document.getElementById("dtKmlLimitZone");
+    if (limitBox && !limitBox.checked) return points || [];
+    const zones = window.getActiveExportPolygons();
+    if (!zones.length || !points) return points || [];
+    if (typeof window._pointInPoly !== "function") return points;
+    return (points || []).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng) && zones.some((z) => window._pointInPoly(p.lat, p.lng, z)));
+  };
+  window.renderExportZones = () => {
+    try {
+      if (window._exportZoneLayerGroup && window.map) { window.map.removeLayer(window._exportZoneLayerGroup); window._exportZoneLayerGroup = null; }
+    } catch (e) { window._exportZoneLayerGroup = null; }
+    const zones = Array.isArray(window.exportPolygons) ? window.exportPolygons : [];
+    if (!zones.length || !window.map || typeof L === "undefined") return;
+    try {
+      const group = L.layerGroup().addTo(window.map);
+      zones.forEach((zone, idx) => {
+        const poly = L.polygon(zone, { color: "#22c55e", weight: 2.5, fillOpacity: 0.08, dashArray: "8 4", interactive: false });
+        try { poly.bindTooltip("Zone export " + (idx + 1), { sticky: true }); } catch (e) {}
+        group.addLayer(poly);
+      });
+      window._exportZoneLayerGroup = group;
+    } catch (e) { console.warn("renderExportZones failed", e); }
+  };
+  window.updateDtKmlZoneStatus = () => {
+    const el = document.getElementById("dtKmlZoneStatus");
+    if (!el) return;
+    const limitBox = document.getElementById("dtKmlLimitZone");
+    const zones = window.getActiveExportPolygons();
+    const logs = window.loadedLogs || (typeof loadedLogs !== "undefined" ? loadedLogs : []);
+    let total = 0;
+    logs.forEach((l) => { total += (l.points ? l.points.length : 0); });
+    if (limitBox && !limitBox.checked) { el.textContent = "Export complet — tout le parcours (" + total + " pts)."; el.style.color = "#999"; return; }
+    if (!zones.length) { el.textContent = "Aucune zone d'export — tout sera exporté (" + total + " pts). Tracez une zone ou appliquez un filtre zone DT."; el.style.color = "#f59e0b"; return; }
+    let inside = 0;
+    if (typeof window._pointInPoly === "function") {
+      logs.forEach((l) => {
+        (l.points || []).forEach((p) => {
+          if (Number.isFinite(p.lat) && Number.isFinite(p.lng) && zones.some((z) => window._pointInPoly(p.lat, p.lng, z))) inside++;
+        });
+      });
+    }
+    const fromFilter = (!window.exportPolygons.length && window.filterActive) ? " (depuis filtre zones DT)" : "";
+    el.textContent = zones.length + " zone(s)" + fromFilter + " — " + inside + " pts dedans / " + total + " au total.";
+    el.style.color = inside ? "#22c55e" : "#ef4444";
+  };
+  const _dtKmlDraw = { drawing: false, points: [], tempPoly: null, lastPt: null };
+  const _dtKmlOnMove = (e) => {
+    if (!_dtKmlDraw.drawing) return;
+    const cp = e.containerPoint;
+    if (_dtKmlDraw.lastPt && Math.hypot(cp.x - _dtKmlDraw.lastPt.x, cp.y - _dtKmlDraw.lastPt.y) < 5) return;
+    _dtKmlDraw.lastPt = cp;
+    _dtKmlDraw.points.push(e.latlng);
+    if (_dtKmlDraw.points.length < 2) return;
+    if (_dtKmlDraw.tempPoly) { try { _dtKmlDraw.tempPoly.setLatLngs(_dtKmlDraw.points); } catch (err) {} }
+    else if (typeof L !== "undefined" && window.map) {
+      try { _dtKmlDraw.tempPoly = L.polygon(_dtKmlDraw.points, { color: "#22c55e", weight: 2, fillOpacity: 0.08, dashArray: "6 3", interactive: false }).addTo(window.map); } catch (err) {}
+    }
+  };
+  const _dtKmlOnUp = () => {
+    _dtKmlDraw.drawing = false;
+    try { window.map.dragging.enable(); } catch (e) {}
+    try { window.map.off("mousemove", _dtKmlOnMove); window.map.off("mouseup", _dtKmlOnUp); window.map.off("mousedown", _dtKmlOnDown); } catch (e) {}
+    try { window.map.getContainer().style.cursor = ""; } catch (e) {}
+    if (_dtKmlDraw.tempPoly) { try { _dtKmlDraw.tempPoly.remove(); } catch (e) {} _dtKmlDraw.tempPoly = null; }
+    _dtKmlDraw.lastPt = null;
+    const pts = _dtKmlDraw.points.slice();
+    _dtKmlDraw.points = [];
+    const modal = document.getElementById("exportKmlModal");
+    if (modal) modal.style.display = "block";
+    if (typeof window.refreshDtKmlLayerList === "function") { try { window.refreshDtKmlLayerList(); } catch (e) {} }
+    if (pts.length < 3) return;
+    window.exportPolygons.push(pts);
+    window.renderExportZones();
+    window.updateDtKmlZoneStatus();
+  };
+  const _dtKmlOnDown = (e) => {
+    _dtKmlDraw.drawing = true;
+    _dtKmlDraw.points = [e.latlng];
+    _dtKmlDraw.lastPt = e.containerPoint;
+    if (_dtKmlDraw.tempPoly) { try { _dtKmlDraw.tempPoly.remove(); } catch (err) {} _dtKmlDraw.tempPoly = null; }
+    try { window.map.dragging.disable(); } catch (err) {}
+    try { window.map.on("mousemove", _dtKmlOnMove); window.map.on("mouseup", _dtKmlOnUp); } catch (err) {}
+  };
+  const btnDtKmlDrawZone = document.getElementById("btnDtKmlDrawZone");
+  if (btnDtKmlDrawZone) {
+    btnDtKmlDrawZone.onclick = () => {
+      if (!window.map) { alert("Carte non prête."); return; }
+      if (_dtKmlDraw.drawing) return;
+      const modal = document.getElementById("exportKmlModal");
+      if (modal) modal.style.display = "none";
+      const limitBox = document.getElementById("dtKmlLimitZone");
+      if (limitBox) limitBox.checked = true;
+      try { window.map.getContainer().style.cursor = "crosshair"; } catch (e) {}
+      try { window.map.on("mousedown", _dtKmlOnDown); } catch (e) { alert("Traçage impossible."); return; }
+    };
+  }
+  const btnDtKmlClearZone = document.getElementById("btnDtKmlClearZone");
+  if (btnDtKmlClearZone) {
+    btnDtKmlClearZone.onclick = () => {
+      window.exportPolygons = [];
+      try { if (window._exportZoneLayerGroup && window.map) window.map.removeLayer(window._exportZoneLayerGroup); } catch (e) {}
+      window._exportZoneLayerGroup = null;
+      window.updateDtKmlZoneStatus();
+    };
+  }
+  const dtKmlLimitBox = document.getElementById("dtKmlLimitZone");
+  if (dtKmlLimitBox) { dtKmlLimitBox.onchange = () => window.updateDtKmlZoneStatus(); }
   const btnDtKmlSelectAll = document.getElementById("btnDtKmlSelectAll");
   if (btnDtKmlSelectAll) {
     btnDtKmlSelectAll.onclick = () => {
@@ -21052,6 +21190,8 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
       const logs = window.loadedLogs || (typeof loadedLogs !== "undefined" ? loadedLogs : []);
+      const zoneLimited = (() => { const b = document.getElementById("dtKmlLimitZone"); return b ? b.checked : true; })();
+      const hasZone = zoneLimited && window.getActiveExportPolygons && window.getActiveExportPolygons().length > 0;
       let ok = 0;
       const errors = [];
       checked.forEach((key, idx) => {
@@ -21069,10 +21209,15 @@ document.addEventListener("DOMContentLoaded", () => {
           if (log) { logName = log.name || "DT"; metric = renderer.activeMetric; points = log.points; }
         }
         if (!points || !points.length) { errors.push(metric + ": aucun point"); return; }
+        let exportPoints = points;
+        if (hasZone && typeof window.filterDtPointsByExportZone === "function") {
+          exportPoints = window.filterDtPointsByExportZone(points);
+          if (!exportPoints.length) { errors.push(metric + ": aucun point dans la zone"); return; }
+        }
         try {
-          const kml = renderer.exportDtLayerKML(points, metric, logName);
+          const kml = renderer.exportDtLayerKML(exportPoints, metric, logName + (hasZone ? "_zone" : ""));
           if (!kml) { errors.push(metric + ": aucune valeur plottable (N/A)"); return; }
-          const filename = sanitizeKmlName(logName) + "_" + sanitizeKmlName(metric) + ".kml";
+          const filename = sanitizeKmlName(logName) + "_" + sanitizeKmlName(metric) + (hasZone ? "_zone" : "") + ".kml";
           setTimeout(() => downloadKmlText(kml, filename), idx * 350);
           ok++;
         } catch (err) {
@@ -21085,7 +21230,7 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
       document.getElementById("exportKmlModal").style.display = "none";
-      if (errors.length) setTimeout(() => alert("Exporté: " + ok + " couche(s).\nAvertissements:\n" + errors.join("\n")), checked.length * 350 + 200);
+      if (errors.length) setTimeout(() => alert("Exporté: " + ok + " couche(s)" + (hasZone ? " (zone uniquement)" : "") + ".\nAvertissements:\n" + errors.join("\n")), checked.length * 350 + 200);
     };
   }
 
