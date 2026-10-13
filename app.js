@@ -20963,6 +20963,132 @@ document.addEventListener("DOMContentLoaded", () => {
     };
   }
 
+  // Modal Action: DT Layers — 1 KML léger (points seuls) par couche RSRP/SINR/...
+  const sanitizeKmlName = (s) => String(s || "DT").replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_").slice(0, 120) || "DT";
+  const downloadKmlText = (text, filename) => {
+    const blob = new Blob([text], { type: "application/vnd.google-earth.kml+xml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  };
+  window.refreshDtKmlLayerList = () => {
+    const box = document.getElementById("dtKmlLayerList");
+    if (!box) return;
+    box.innerHTML = "";
+    const entries = window.metricLegendEntries ? Object.entries(window.metricLegendEntries) : [];
+    const logs = window.loadedLogs || (typeof loadedLogs !== "undefined" ? loadedLogs : []);
+    const items = [];
+    entries.forEach(([key, entry]) => {
+      if (!entry) return;
+      const log = (logs || []).find((l) => l.id === entry.logId);
+      const logName = (log && log.name) || String(entry.logId || "DT");
+      const metric = entry.metric || entry.title || key;
+      const title = (entry.title || metric) + " — " + logName;
+      items.push({ key, title, logName, metric, points: entry.points || (log && log.points) || [], visible: entry.visible !== false });
+    });
+    // Fallback legacy: active log/metric sans metricLegendEntries (ancien affichage)
+    if (!items.length) {
+      const renderer = window.mapRenderer;
+      if (renderer && renderer.activeLogId && renderer.activeMetric) {
+        const log = (logs || []).find((l) => l.id === renderer.activeLogId);
+        if (log && log.points) {
+          items.push({ key: "__active__", title: renderer.activeMetric + " — " + (log.name || "DT"), logName: log.name || "DT", metric: renderer.activeMetric, points: log.points, visible: true });
+        }
+      }
+    }
+    if (!items.length) {
+      box.innerHTML = '<div style="padding:6px 8px; color:#999;">Aucune couche DT active. Affichez RSRP / SINR sur la carte d\'abord.</div>';
+      return;
+    }
+    items.forEach((it) => {
+      const row = document.createElement("label");
+      row.style.cssText = "display:flex; align-items:center; gap:8px; padding:5px 6px; border-bottom:1px solid #333; cursor:pointer;";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = it.visible !== false;
+      cb.value = it.key;
+      cb.className = "dt-kml-check";
+      const span = document.createElement("span");
+      span.style.cssText = "flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#ddd;";
+      span.textContent = it.title;
+      span.title = it.title;
+      const count = document.createElement("span");
+      count.style.cssText = "color:#888; font-size:11px;";
+      count.textContent = (it.points ? it.points.length : 0) + " pts";
+      row.appendChild(cb);
+      row.appendChild(span);
+      row.appendChild(count);
+      box.appendChild(row);
+    });
+  };
+  const btnDtKmlSelectAll = document.getElementById("btnDtKmlSelectAll");
+  if (btnDtKmlSelectAll) {
+    btnDtKmlSelectAll.onclick = () => {
+      document.querySelectorAll("#dtKmlLayerList .dt-kml-check").forEach((cb) => { cb.checked = true; });
+    };
+  }
+  const btnDtKmlSelectNone = document.getElementById("btnDtKmlSelectNone");
+  if (btnDtKmlSelectNone) {
+    btnDtKmlSelectNone.onclick = () => {
+      document.querySelectorAll("#dtKmlLayerList .dt-kml-check").forEach((cb) => { cb.checked = false; });
+    };
+  }
+  const btnExportDtLayers = document.getElementById("btnExportDtLayers");
+  if (btnExportDtLayers) {
+    btnExportDtLayers.onclick = () => {
+      const renderer = window.mapRenderer;
+      if (!renderer || typeof renderer.exportDtLayerKML !== "function") {
+        alert("Export KML DT non disponible (mapRenderer manquant).");
+        return;
+      }
+      const checked = Array.from(document.querySelectorAll("#dtKmlLayerList .dt-kml-check")).filter((cb) => cb.checked).map((cb) => cb.value);
+      if (!checked.length) {
+        alert("Cochez au moins une couche DT (RSRP, SINR, ...).");
+        return;
+      }
+      const logs = window.loadedLogs || (typeof loadedLogs !== "undefined" ? loadedLogs : []);
+      let ok = 0;
+      const errors = [];
+      checked.forEach((key, idx) => {
+        let entry = window.metricLegendEntries ? window.metricLegendEntries[key] : null;
+        let logName = "DT";
+        let metric = key;
+        let points = null;
+        if (entry) {
+          const log = (logs || []).find((l) => l.id === entry.logId);
+          logName = (log && log.name) || String(entry.logId || "DT");
+          metric = entry.metric || entry.title || key;
+          points = entry.points || (log && log.points) || [];
+        } else if (key === "__active__" && renderer.activeLogId) {
+          const log = (logs || []).find((l) => l.id === renderer.activeLogId);
+          if (log) { logName = log.name || "DT"; metric = renderer.activeMetric; points = log.points; }
+        }
+        if (!points || !points.length) { errors.push(metric + ": aucun point"); return; }
+        try {
+          const kml = renderer.exportDtLayerKML(points, metric, logName);
+          if (!kml) { errors.push(metric + ": aucune valeur plottable (N/A)"); return; }
+          const filename = sanitizeKmlName(logName) + "_" + sanitizeKmlName(metric) + ".kml";
+          setTimeout(() => downloadKmlText(kml, filename), idx * 350);
+          ok++;
+        } catch (err) {
+          console.warn("Export DT KML failed for " + metric, err);
+          errors.push(metric + ": " + (err && err.message ? err.message : err));
+        }
+      });
+      if (!ok) {
+        alert("Export impossible.\n" + errors.join("\n"));
+        return;
+      }
+      document.getElementById("exportKmlModal").style.display = "none";
+      if (errors.length) setTimeout(() => alert("Exporté: " + ok + " couche(s).\nAvertissements:\n" + errors.join("\n")), checked.length * 350 + 200);
+    };
+  }
+
   const workspaceInput = document.getElementById("workspaceInput");
   const btnWorkspace = document.getElementById("workspaceBtn");
   const btnExportKml = document.getElementById("exportKmlBtn");
@@ -30366,6 +30492,9 @@ document.addEventListener("DOMContentLoaded", () => {
           e.stopPropagation();
           const modal = document.getElementById("exportKmlModal");
           if (modal) modal.style.display = "block";
+          if (typeof window.refreshDtKmlLayerList === "function") {
+            try { window.refreshDtKmlLayerList(); } catch (err) { console.warn(err); }
+          }
         };
       }
     } else {
@@ -42255,6 +42384,9 @@ document.addEventListener("DOMContentLoaded", () => {
       _exportBtn.onclick = () => {
         const modal = document.getElementById("exportKmlModal");
         if (modal) modal.style.display = "block";
+        if (typeof window.refreshDtKmlLayerList === "function") {
+          try { window.refreshDtKmlLayerList(); } catch (e) { console.warn(e); }
+        }
       };
     }
   }

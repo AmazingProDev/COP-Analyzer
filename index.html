@@ -1430,7 +1430,7 @@
     </aside>
 
     <script defer src="site_match_utils.js?v=1"></script>
-    <script defer src="map_renderer.js?v=132"></script>
+    <script defer src="map_renderer.js?v=133"></script>
     <script defer src="cesium_map_adapter.js?v=5"></script>
     <script defer src="analyze_stats.js?v=2"></script>
     <script defer src="metric_registry.js?v=7"></script>
@@ -1459,7 +1459,14 @@
                     onclick="document.getElementById('exportKmlModal').style.display='none'">&times;</span>
             </div>
             <div class="modal-body glass-modal-body">
-                <p class="modal-subtext modal-subtext-clean">Choose what you want to export:</p>
+                <p class="modal-subtext modal-subtext-clean">DT layers → 1 KML léger par couche (points seuls, RSRP / SINR / ...) :</p>
+                <div id="dtKmlLayerList" style="max-height:220px; overflow-y:auto; margin:8px 0; border:1px solid #444; border-radius:6px; padding:6px; text-align:left; font-size:12px;"></div>
+                <div class="glass-btn-group" style="margin-bottom:10px;">
+                    <button id="btnDtKmlSelectAll" class="btn" type="button">Tout cocher</button>
+                    <button id="btnDtKmlSelectNone" class="btn" type="button">Tout décocher</button>
+                    <button id="btnExportDtLayers" class="btn" type="button" style="border-color:#22c55e;">Export DT layers (1 KML / couche)</button>
+                </div>
+                <p class="modal-subtext modal-subtext-clean">Autres exports :</p>
                 <div class="glass-btn-group">
                     <button id="btnExportCurrentView" class="btn">Current View</button>
                     <button id="btnExportAllSites" class="btn">All Sites</button>
@@ -1552,7 +1559,7 @@
     <script defer src="benchmark_nemo_ui_state.js?v=1"></script>
     <script defer src="theme_v2.js?v=v598"></script>
     <script defer src="window_manager.js?v=3"></script>
-    <script defer src="app.js?v=v904"></script>
+    <script defer src="app.js?v=v905"></script>
     <script defer src="radio_dt_cop_export.js?v=20"></script>
     <script defer src="radio_degradation_ui.js?v=45"></script>
     <!-- User Point Modal -->

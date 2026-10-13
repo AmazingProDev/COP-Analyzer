@@ -4340,6 +4340,111 @@ ${geometry}
         return kml;
     }
 
+    // Lightweight DT layer export: points only, 1 KML per metric (RSRP, SINR...).
+    // Grouped by threshold label folders, colors synced with getColor().
+    // No sites, no spider lines — suitable for Google Earth + MapInfo.
+    exportDtLayerKML(logPoints, metricName, logName) {
+        if (!logPoints || logPoints.length === 0) return null;
+        const safeMetric = String(metricName || "metric");
+        const safeLog = String(logName || safeMetric).slice(0, 80);
+        const escapeXml = (unsafe) => {
+            if (unsafe === undefined || unsafe === null) return "";
+            const stripped = String(unsafe).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
+            return stripped.replace(/[<>&'"]/g, (c) => {
+                switch (c) {
+                    case "<": return "&lt;";
+                    case ">": return "&gt;";
+                    case "&": return "&amp;";
+                    case "'": return "&apos;";
+                    case '"': return "&quot;";
+                }
+            });
+        };
+        const hexToKmlColor = (hex) => {
+            if (!hex || hex[0] !== "#") return "ffcccccc";
+            return "ff" + hex.substring(5, 7) + hex.substring(3, 5) + hex.substring(1, 3);
+        };
+        let thresholds = null;
+        try {
+            if (window.getThresholdKey && window.themeConfig) {
+                const rangeKey = window.getThresholdKey(safeMetric);
+                if (rangeKey && window.themeConfig.thresholds && window.themeConfig.thresholds[rangeKey]) {
+                    thresholds = window.themeConfig.thresholds[rangeKey];
+                }
+            }
+        } catch (e) { thresholds = null; }
+        const groups = new Map();
+        const styleColors = new Map();
+        let exported = 0;
+        let skipped = 0;
+        (logPoints || []).forEach((p) => {
+            if (p == null || p.lat === undefined || p.lng === undefined) { skipped++; return; }
+            const lat = Number(p.lat);
+            const lng = Number(p.lng);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) { skipped++; return; }
+            let val = null;
+            try { val = this.getMetricValue(p, safeMetric); } catch (e) { val = p[safeMetric]; }
+            if (val === undefined || val === null || val === "" || val === "N/A") { skipped++; return; }
+            let color = "#888";
+            try { color = this.getColor(val, safeMetric) || "#888"; } catch (e) { color = "#888"; }
+            const styleId = "s_" + String(color).replace(/[^a-zA-Z0-9]/g, "");
+            if (!styleColors.has(styleId)) styleColors.set(styleId, hexToKmlColor(color));
+            let groupName = "Others";
+            const numVal = Number(val);
+            if (thresholds && Number.isFinite(numVal)) {
+                for (const t of thresholds) {
+                    const contains = window.thresholdBandContains
+                        ? window.thresholdBandContains(numVal, t)
+                        : ((t.min === undefined || numVal >= t.min) && (t.max === undefined || numVal <= t.max));
+                    if (contains) { groupName = t.label; break; }
+                }
+            } else if (val !== undefined && val !== null && val !== "") {
+                groupName = String(val).slice(0, 60);
+            }
+            if (!groups.has(groupName)) groups.set(groupName, []);
+            const timeTxt = p.time || (p.properties && p.properties.Time) || "";
+            const valTxt = (typeof val === "number" && Number.isFinite(val)) ? (Math.round(val * 10) / 10) : String(val);
+            const desc = `${safeMetric}: ${valTxt} | Time: ${timeTxt} | Lat:${Number(lat).toFixed(5)} Lng:${Number(lng).toFixed(5)}`;
+            let geometry = `<Point><coordinates>${lng},${lat},0</coordinates></Point>`;
+            try {
+                if (p.geometry && (p.geometry.type === "Polygon" || p.geometry.type === "MultiPolygon")) {
+                    let coords = p.geometry.coordinates;
+                    if (p.geometry.type === "MultiPolygon") coords = coords[0];
+                    if (Array.isArray(coords) && Array.isArray(coords[0]) && Array.isArray(coords[0][0])) coords = coords[0];
+                    if (Array.isArray(coords) && coords.length > 2) {
+                        const coordStr = coords.map((c) => `${c[0]},${c[1]},0`).join(" ");
+                        geometry = `<Polygon><outerBoundaryIs><LinearRing><coordinates>${coordStr}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+                    }
+                }
+            } catch (e) { /* keep Point */ }
+            groups.get(groupName).push(`    <Placemark><name></name><description>${escapeXml(desc)}</description><styleUrl>#sm_${styleId}</styleUrl>${geometry}</Placemark>`);
+            exported++;
+        });
+        if (!exported) return null;
+        let kml = `<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2">\n  <Document>\n    <name>${escapeXml(safeLog)} - ${escapeXml(safeMetric.toUpperCase())} (${exported} pts)</name>\n    <open>1</open>\n`;
+        styleColors.forEach((kColor, styleId) => {
+            kml += `    <Style id="${styleId}_normal">\n      <IconStyle><color>${kColor}</color><scale>0.9</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/shaded_dot.png</href></Icon></IconStyle>\n      <LabelStyle><scale>0</scale></LabelStyle>\n    </Style>\n`;
+            kml += `    <Style id="${styleId}_highlight">\n      <IconStyle><color>${kColor}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/shaded_dot.png</href></Icon></IconStyle>\n      <LabelStyle><scale>0</scale></LabelStyle>\n    </Style>\n`;
+            kml += `    <StyleMap id="sm_${styleId}">\n      <Pair><key>normal</key><styleUrl>#${styleId}_normal</styleUrl></Pair>\n      <Pair><key>highlight</key><styleUrl>#${styleId}_highlight</styleUrl></Pair>\n    </StyleMap>\n`;
+        });
+        let orderedKeys = Array.from(groups.keys()).sort();
+        if (thresholds) {
+            const tLabels = thresholds.map((t) => t.label);
+            const others = orderedKeys.filter((k) => !tLabels.includes(k));
+            orderedKeys = [...tLabels.filter((k) => groups.has(k)), ...others];
+        }
+        orderedKeys.forEach((key) => {
+            const content = groups.get(key);
+            if (content && content.length > 0) {
+                kml += `    <Folder>\n      <name>${escapeXml(key)} (${content.length})</name>\n`;
+                kml += content.join("\n");
+                kml += `\n    </Folder>\n`;
+            }
+        });
+        kml += "\n  </Document>\n</kml>";
+        return kml;
+    }
+
     // internal helper for points refactored from exportToKML
     _generatePointsKMLParts(logPoints, metricName) {
         // ... (Logic from exportToKML but returning { styles: [{id, xml}], folders: string }) ...
