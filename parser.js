@@ -3101,6 +3101,8 @@ const BenchmarkTxtParser = {
                 if (state.indexes.nrPci === undefined && normalized === 'nr pci') state.indexes.nrPci = index;
                 if (state.indexes.cellType === undefined && normalized === 'cell type') state.indexes.cellType = index;
                 if (state.indexes.band === undefined && normalized === 'band') state.indexes.band = index;
+                if (state.indexes.voiceFactor === undefined && normalized === 'f-factor') state.indexes.voiceFactor = index;
+                if (state.indexes.voiceInterval === undefined && normalized === 'interval') state.indexes.voiceInterval = index;
                 const isUsefulKpi = /(?:\bmos\b|throughput|\brate\b|bler|packet\s*loss|\bcqi\b|\bri\b|\bprb\b|retransmission|\brtt\b|latency|rsrp|rsrq|sinr|ss-rsrp|ss-rsrq|ss-sinr|pusch|pdsch)/i.test(name);
                 if (isUsefulKpi) {
                     const displayName = this._displayMetric(name, index);
@@ -3110,6 +3112,18 @@ const BenchmarkTxtParser = {
                         isMos: /\bmos\b/i.test(displayName) });
                 }
             });
+            // Voice-call record family (e.g. POLQA rows): a trailing PCI next
+            // to the F-factor/interval block identifies the voice serving
+            // cell.  Only used as last-resort display context when no
+            // measured RF exists — never as analysis input.
+            if (state.indexes.voiceFactor !== undefined || state.indexes.voiceInterval !== undefined) {
+                for (let index = state.header.length - 1; index >= 0; index--) {
+                    if (this._normalizedHeader(state.header[index]) === 'pci') {
+                        state.indexes.voicePci = index;
+                        break;
+                    }
+                }
+            }
             // The Benchmark export repeats "Cell type" for several record
             // families.  The two blocks followed by RSRP/RSRQ/SINR are the
             // per-component NR and LTE radio measurements.  Discover their
@@ -3168,6 +3182,18 @@ const BenchmarkTxtParser = {
             point.lat = lat;
             point.lng = lng;
             state.validGpsRows += 1;
+        }
+
+        // Voice serving PCI (F-factor/interval record family).  Kept as a
+        // raw snapshot field; the finalize step turns it into display-only
+        // Point Details context for RF-less (e.g. MOS-only) timestamps.
+        if (state.indexes.voicePci !== undefined) {
+            const hasVoiceCtx = (state.indexes.voiceFactor !== undefined && String(values[state.indexes.voiceFactor] ?? '').trim() !== '') ||
+                (state.indexes.voiceInterval !== undefined && String(values[state.indexes.voiceInterval] ?? '').trim() !== '');
+            if (hasVoiceCtx) {
+                const voicePci = this._number(values[state.indexes.voicePci]);
+                if (voicePci !== null) point.__voicePci = Math.trunc(voicePci);
+            }
         }
 
         if (state.neighborLayout) {
@@ -3263,6 +3289,90 @@ const BenchmarkTxtParser = {
             this._resolveAmbiguousPrimaryTimestamps(state, toTimestamp, distanceMeters);
             state.snapshots.forEach(point => this._materializeNeighborLayoutPoint(state, point));
         }
+        // Display-only nearest-RF context: MOS/audio rows often carry no RF
+        // of their own while dense RF rows without GPS never become map
+        // points.  Index every snapshot's serving RF (parsed points and
+        // GPS-less rows alike) so RF-less points can show their closest
+        // radio context in Point Details.  Analysis and map layers only ever
+        // read the point's own values.
+        const numOrNull = (value) => {
+            if (value === undefined || value === null) return null;
+            if (typeof value === 'string' && value.trim() === '') return null;
+            const n = Number(value);
+            return Number.isFinite(n) ? n : null;
+        };
+        const snapshotRfDescriptor = (snap) => {
+            if (!snap || snap.__benchmarkAmbiguousPrimary) return null;
+            const comps = Array.isArray(snap.__benchmarkComponents) ? snap.__benchmarkComponents : [];
+            const nrPrim = comps.find(c => c && c.technology === 'NR' && /^(?:PSCell|SpCell)$/i.test(String(c.type || '')));
+            const ltePrim = comps.find(c => c && c.technology === 'LTE' && /^PCell$/i.test(String(c.type || '')));
+            const prim = nrPrim || ltePrim || null;
+            let measured = null;
+            const byId = snap.__benchmarkComponentByIdentity;
+            if (prim && byId instanceof Map) {
+                measured = byId.get(`${prim.technology}|${prim.type}|${prim.channel}|${prim.pci}`) || null;
+            }
+            const snapMetric = (nrName, lteName) => prim
+                ? numOrNull(snap[prim.technology === 'NR' ? nrName : lteName])
+                : null;
+            const rsrp = (measured && Number.isFinite(measured.rsrp)) ? measured.rsrp
+                : (snapMetric('5G RSRP', '4G RSRP') ?? numOrNull(snap['5G RSRP']) ?? numOrNull(snap['4G RSRP']));
+            const rsrq = (measured && Number.isFinite(measured.rsrq)) ? measured.rsrq
+                : (snapMetric('5G RSRQ', '4G RSRQ') ?? numOrNull(snap['5G RSRQ']) ?? numOrNull(snap['4G RSRQ']));
+            const sinr = (measured && Number.isFinite(measured.sinr)) ? measured.sinr
+                : (snapMetric('5G SINR', '4G SINR') ?? numOrNull(snap['5G SINR']) ?? numOrNull(snap['4G SINR']));
+            const pci = prim ? numOrNull(prim.pci) : null;
+            if (pci === null && rsrp === null) return null;
+            return {
+                pci,
+                freq: prim ? (numOrNull(prim.channel) ?? null) : null,
+                rat: prim ? prim.technology : null,
+                rsrp, rsrq, sinr,
+            };
+        };
+        const rfTimeIndex = [];
+        const voiceTimeIndex = [];
+        state.snapshots.forEach(snap => {
+            const ms = toTimestamp(snap.time);
+            if (!Number.isFinite(ms)) return;
+            const desc = snapshotRfDescriptor(snap);
+            if (desc) rfTimeIndex.push({ ms, desc });
+            if (Number.isInteger(snap.__voicePci)) voiceTimeIndex.push({ ms, pci: snap.__voicePci });
+            delete snap.__voicePci;
+        });
+        rfTimeIndex.sort((a, b) => a.ms - b.ms);
+        voiceTimeIndex.sort((a, b) => a.ms - b.ms);
+        const nearestWithin = (index, ms, windowMs) => {
+            let lo = 0, hi = index.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (index[mid].ms < ms) lo = mid + 1;
+                else hi = mid;
+            }
+            let best = null;
+            for (const idx of [lo - 1, lo]) {
+                const entry = index[idx];
+                if (!entry) continue;
+                const dt = entry.ms - ms;
+                if (Math.abs(dt) > windowMs) continue;
+                if (!best || Math.abs(dt) < Math.abs(best.dt)) best = { entry, dt };
+            }
+            return best;
+        };
+        const nearestRfWithin = (ms, windowMs) => {
+            const hit = nearestWithin(rfTimeIndex, ms, windowMs);
+            return hit ? { ...hit.entry.desc, deltaMs: hit.dt } : null;
+        };
+        const nearestVoiceWithin = (ms, windowMs) => {
+            const hit = nearestWithin(voiceTimeIndex, ms, windowMs);
+            return hit ? { pci: hit.entry.pci, deltaMs: hit.dt } : null;
+        };
+        const pointHasServingRf = (pt) => {
+            const s = (pt.parsed && pt.parsed.serving) || {};
+            if (numOrNull(s.pci ?? s.sc ?? pt.pci ?? pt.sc) !== null) return true;
+            const pr = pt.properties || {};
+            return numOrNull(pr['Serving RSRP'] ?? pt['Serving RSRP'] ?? pr['5G RSRP'] ?? pt['5G RSRP'] ?? pr['4G RSRP'] ?? pt['4G RSRP'] ?? pt.rsrp ?? pt.level) !== null;
+        };
         let points = Array.from(state.snapshots.values()).filter(point =>
             !point.__benchmarkAmbiguousPrimary && this._validCoordinate(point.lat, point.lng) &&
             (Object.keys(point.properties || {}).length > 0 || point.parsed?.neighbors?.length > 0)
@@ -3561,6 +3671,41 @@ const BenchmarkTxtParser = {
         });
         flushGroup();
         points = merged.map((point, index) => ({ ...point, id: index }));
+
+        // Attach the closest raw RF snapshot (±10 s) to points without any
+        // serving RF of their own (typical for MOS-only rows).  Stored as a
+        // display-only `__nearestRf` context: Point Details shows it with its
+        // Δt, while analysis and map layers keep using measured values.
+        // Nearest-fill bound: ±15 min.  Beyond that the measurement belongs
+        // to another drive period and showing it as serving RF would be
+        // fabrication, not context.  Voice PCI stays tight (±10 s, dense).
+        const NEAREST_RF_WINDOW_MS = 900000;
+        const NEAREST_VOICE_WINDOW_MS = 10000;
+        if (rfTimeIndex.length || voiceTimeIndex.length) {
+            points.forEach(point => {
+                if (point.__nearestRf || pointHasServingRf(point)) return;
+                const ms = toTimestamp(point.time);
+                if (!Number.isFinite(ms)) return;
+                if (rfTimeIndex.length) {
+                    const near = nearestRfWithin(ms, NEAREST_RF_WINDOW_MS);
+                    if (near) {
+                        point.__nearestRf = near;
+                        return;
+                    }
+                }
+                // Last resort: voice serving PCI (no RSRP/RSRQ/SINR measured).
+                if (voiceTimeIndex.length) {
+                    const vnear = nearestVoiceWithin(ms, NEAREST_VOICE_WINDOW_MS);
+                    if (vnear) {
+                        point.__nearestRf = {
+                            pci: vnear.pci, freq: null, rat: null,
+                            rsrp: null, rsrq: null, sinr: null,
+                            deltaMs: vnear.deltaMs, voicePciOnly: true,
+                        };
+                    }
+                }
+            });
+        }
 
         // Benchmark/Nemo exports do not always contain decoded RRC handover
         // messages.  We can nevertheless expose a *measured* NR PSCell

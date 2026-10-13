@@ -20,7 +20,7 @@
   const NeighborMobility = globalThis.RadioNeighborMobilityRca || (typeof require === "function" ? require("./radio_neighbor_mobility_rca.js") : null);
   const ScanFusion = globalThis.RadioScanFusion || (typeof require === "function" ? require("./radio_scan_fusion.js") : null);
   const Scoring = globalThis.RadioScoring || (typeof require === "function" ? require("./radio_scoring.js") : null);
-  const VERSION = "lte-nr-radio-v17"; // COP: v16 + hard min-degraded-snapshots gate (no fast-critical bypass on count)
+  const VERSION = "lte-nr-radio-v18"; // COP: v17 + MOS threshold re-anchors severe/critical/recovery (no flag above user threshold)
   const DEFAULT_COMMON = Object.freeze(Profiles.radioDefaults(Profiles.DEFAULT));
   const DEFAULT_PROFILES = Object.freeze({
     lte: Object.freeze({ ...DEFAULT_COMMON, id: "lte-radio-default-v2", rat: "LTE" }),
@@ -1849,6 +1849,19 @@
       throughput: { ...(Profiles?.getProfile({ ...options.profileContext, purpose: "DATA" }, options.profileOverrides)?.throughput || {}),
         ...(options?.profiles?.throughput || options?.throughput || {}) },
     };
+    // A caller-supplied MOS threshold re-anchors its dependent levels.  The
+    // absolute severe/critical defaults (3.0/2.5) would otherwise keep
+    // flagging MOS above the chosen threshold as degraded (e.g. 2.83 with a
+    // 2.2 threshold via the P10 < severe rule).  Explicit levels are kept.
+    {
+      const mosRequest = options?.profiles?.mos || options?.mos || {};
+      const degraded = Number(mosRequest.degraded);
+      if (mosRequest.degraded !== undefined && Number.isFinite(degraded)) {
+        if (mosRequest.severe === undefined) profiles.mos.severe = degraded;
+        if (mosRequest.critical === undefined) profiles.mos.critical = degraded;
+        if (mosRequest.recovery === undefined) profiles.mos.recovery = Math.round((degraded + 0.2) * 100) / 100;
+      }
+    }
     const snapshotsByRat = buildSnapshots(points, profiles);
     // Preserve sub-second serving observations for RCA chronology. The LTE
     // PCell remains available as an NSA anchor but is never an NR neighbour.

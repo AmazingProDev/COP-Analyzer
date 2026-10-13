@@ -46790,6 +46790,164 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       sRSCP = p.level;
     }
 
+    // Benchmark TXT: MOS/audio rows often carry no RF of their own (radio
+    // and voice samples interleave at slightly different timestamps, and RF
+    // rows can be sparse). As a last resort, borrow the nearest serving RF
+    // snapshot for DISPLAY ONLY: analysis and map layers keep using the
+    // point's own values.
+    let nearestRfNote = null;
+    let nearestRfStale = false;
+    // Parser-attached raw RF context (nearest snapshot, any GPS state) wins
+    // over the parsed-points scan below — it sees the dense RF rows that
+    // never became map points.  fin() guards against Number(null) === 0.
+    const finAttached = (v) => v !== undefined && v !== null && String(v).trim() !== "" && Number.isFinite(Number(v));
+    const attachedRf = p.__nearestRf;
+    const attachedRfUsable = attachedRf && (finAttached(attachedRf.pci) || finAttached(attachedRf.rsrp));
+    const rfBlank = (sSC === "-" || sSC === undefined) &&
+      (sRSCP === "-" || sRSCP === undefined) &&
+      (sSinr === "-" || sSinr === undefined);
+    if (attachedRfUsable && rfBlank) {
+      try {
+        if ((sSC === "-" || sSC === undefined) && finAttached(attachedRf.pci)) sSC = attachedRf.pci;
+        if (sRSCP === "-" && finAttached(attachedRf.rsrp)) sRSCP = attachedRf.rsrp;
+        if (sEcNo === "-" && finAttached(attachedRf.rsrq)) sEcNo = attachedRf.rsrq;
+        if (sSinr === "-" && finAttached(attachedRf.sinr)) sSinr = attachedRf.sinr;
+        if (sFreq === "-" && attachedRf.freq !== undefined && attachedRf.freq !== null && String(attachedRf.freq).trim() !== "") sFreq = attachedRf.freq;
+        // Adaptive Δt label; measurements >60 s away are flagged stale so a
+        // far-away snapshot can never pass for the point's own serving RF.
+        const fmtDt = (ms) => {
+          const a = Math.abs(Number(ms));
+          if (!Number.isFinite(a)) return null;
+          if (a < 60000) return (a / 1000).toFixed(1).replace(".", ",") + " s";
+          if (a < 3600000) return Math.round(a / 60000) + " min";
+          if (a < 86400000) return Math.round(a / 3600000) + " h";
+          return Math.round(a / 86400000) + " j";
+        };
+        const dTxt = fmtDt(attachedRf.deltaMs);
+        const dirTxt = Number(attachedRf.deltaMs) >= 0 ? "après" : "avant";
+        nearestRfStale = Number.isFinite(Number(attachedRf.deltaMs)) && Math.abs(Number(attachedRf.deltaMs)) > 60000;
+        nearestRfNote = attachedRf.voicePciOnly
+          ? "PCI issu du contexte voix le plus proche" + (dTxt ? " (" + dTxt + " " + dirTxt + " ce point)" : "") + " — aucune mesure RSRP/RSRQ/SINR à cet horodatage dans le DT."
+          : dTxt
+            ? (nearestRfStale
+              ? "RF éloignée affichée (" + dTxt + " " + dirTxt + " ce point) — mesure d'une autre période, non représentative ; aucune mesure RF à cet horodatage."
+              : "RF affichée = snapshot le plus proche (" + dTxt + " " + dirTxt + " ce point) — aucune mesure RF à cet horodatage (données brutes du DT).")
+            : "RF affichée = snapshot RF voisin — aucune mesure RF à cet horodatage.";
+        try {
+          console.info("[PointDetails] parser-attached RF:", { time: p.time ?? p.t ?? p.timestamp, deltaMs: attachedRf.deltaMs, pci: attachedRf.pci, rsrp: attachedRf.rsrp });
+        } catch (_) {}
+      } catch (_) {}
+    } else if (
+      rfBlank &&
+      activeLog && Array.isArray(activeLog.points) && activeLog.points.length > 1
+    ) {
+      try {
+        const finNum = (v) => {
+          if (v === undefined || v === null) return null;
+          if (typeof v === "string" && v.trim() === "") return null;
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        };
+        const timeMs = (t) => {
+          if (t === undefined || t === null) return NaN;
+          if (typeof t === "number" && Number.isFinite(t)) return t > 1e12 ? t : t * 1000;
+          const ms = Date.parse(String(t));
+          return Number.isFinite(ms) ? ms : NaN;
+        };
+        const servingRfOf = (cand) => {
+          if (!cand) return null;
+          const cServ = (cand.parsed && cand.parsed.serving) || {};
+          const cProps = cand.properties || {};
+          const pci = finNum(cServ.pci ?? cServ.sc ?? cand.pci ?? cand.sc);
+          const rsrp = finNum(cProps["Serving RSRP"] ?? cand["Serving RSRP"] ?? cProps["5G RSRP"] ?? cand["5G RSRP"] ?? cProps["4G RSRP"] ?? cand["4G RSRP"] ?? cand.rsrp ?? cand.level);
+          if (pci === null && rsrp === null) return null;
+          return {
+            pci,
+            rsrp,
+            rsrq: finNum(cProps["Serving RSRQ"] ?? cand["Serving RSRQ"] ?? cProps["5G RSRQ"] ?? cand["5G RSRQ"] ?? cProps["4G RSRQ"] ?? cand["4G RSRQ"] ?? cand.rsrq ?? cand.ecno),
+            sinr: finNum(cProps["Serving SINR"] ?? cand["Serving SINR"] ?? cProps["5G SINR"] ?? cand["5G SINR"] ?? cProps["4G SINR"] ?? cand["4G SINR"] ?? cand.sinr),
+            freq: cServ.freq ?? cServ.earfcn ?? cServ.nrarfcn ?? cand.freq,
+          };
+        };
+        const pts = activeLog.points;
+        const t0 = timeMs(p.time ?? p.t ?? p.timestamp);
+        let best = null;
+        let bestDt = Infinity;
+        let scanned = 0;
+        if (Number.isFinite(t0)) {
+          for (let i = 0; i < pts.length; i++) {
+            const cand = pts[i];
+            if (!cand || cand === p) continue;
+            const tq = timeMs(cand.time ?? cand.t ?? cand.timestamp);
+            if (!Number.isFinite(tq)) continue;
+            scanned++;
+            const dt = tq - t0;
+            const adt = Math.abs(dt);
+            if (adt >= bestDt || adt > 60000) continue;
+            const rf = servingRfOf(cand);
+            if (!rf) continue;
+            best = { ...rf, dt, dtKnown: true };
+            bestDt = adt;
+          }
+        }
+        // Fallback: unparseable timestamps — walk outward from the point's
+        // position in the (chronological) log order.
+        if (!best) {
+          let selfIdx = pts.indexOf(p);
+          if (selfIdx < 0) {
+            const pid = p && p.id;
+            const ptime = p && p.time;
+            const plat = p && p.lat;
+            const plng = p && p.lng;
+            selfIdx = pts.findIndex((cand) => cand &&
+              ((pid !== undefined && cand.id === pid) ||
+                (ptime && cand.time === ptime && cand.lat === plat && cand.lng === plng)));
+          }
+          if (selfIdx >= 0) {
+            for (let step = 1; step <= 120 && step < pts.length; step++) {
+              const ahead = pts[selfIdx + step];
+              const behind = pts[selfIdx - step];
+              const rfAhead = ahead && ahead !== p ? servingRfOf(ahead) : null;
+              const rfBehind = !rfAhead && behind && behind !== p ? servingRfOf(behind) : null;
+              const rf = rfAhead || rfBehind;
+              if (rf) {
+                const src = rfAhead ? ahead : behind;
+                const dt = timeMs(src.time ?? src.t ?? src.timestamp) - t0;
+                best = { ...rf, dt, dtKnown: Number.isFinite(t0) && Number.isFinite(dt) };
+                break;
+              }
+            }
+          }
+        }
+        try {
+          console.info("[PointDetails] nearest-RF lookup:", {
+            time: p.time ?? p.t ?? p.timestamp,
+            logPoints: pts.length,
+            scanned,
+            found: !!best,
+            deltaSec: best && best.dtKnown ? Math.round(best.dt / 100) / 10 : null,
+            pci: best && best.pci,
+            rsrp: best && best.rsrp,
+          });
+        } catch (_) {}
+        if (best) {
+          if ((sSC === "-" || sSC === undefined) && best.pci !== null) sSC = best.pci;
+          if (sRSCP === "-" && best.rsrp !== null) sRSCP = best.rsrp;
+          if (sEcNo === "-" && best.rsrq !== null) sEcNo = best.rsrq;
+          if (sSinr === "-" && best.sinr !== null) sSinr = best.sinr;
+          if (sFreq === "-" && best.freq !== undefined && best.freq !== null && String(best.freq).trim() !== "") sFreq = best.freq;
+          nearestRfNote = best.dtKnown
+            ? "RF affichée = snapshot le plus proche (" + (Math.abs(best.dt) / 1000).toFixed(1).replace(".", ",") + " s " + (best.dt >= 0 ? "après" : "avant") + " ce point) — aucune mesure RF à cet horodatage."
+            : "RF affichée = snapshot RF voisin (ordre chronologique) — aucune mesure RF à cet horodatage.";
+        } else {
+          // Local MOS check (pointMosForDetails is declared later in this scope).
+          const mosCands = [p.mos, p["MOS DL"], p.properties && (p.properties["Audio quality MOS DL"] ?? p.properties["MOS DL"] ?? p.properties["MOS"])];
+          const hasMos = mosCands.some((v) => v !== undefined && v !== null && String(v).trim() !== "" && String(v).toUpperCase() !== "N/A" && Number.isFinite(Number(v)));
+          if (hasMos) nearestRfNote = "Aucune mesure RF serving à ±60 s de ce point MOS sur ce log.";
+        }
+      } catch (_) {}
+    }
+
     // A Voice UMTS snapshot must be resolved from its RF identity, not from
     // the workbook's cell label.  PSC values repeat, hence the exact UARFCN
     // and closest BDD sector are both required here.
@@ -48763,6 +48921,15 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       servingRowDistanceDisplay +
       "</td>" +
       "</tr>";
+    if (nearestRfNote) {
+      rows +=
+        '<tr><td colspan="' + totalDetailColumns +
+        '" style="padding:7px 6px;font-size:11px;border-bottom:1px solid #333;' +
+        (nearestRfStale
+          ? 'color:#fbbf24;background:rgba(251,191,36,0.08);">⚠ '
+          : 'color:#7dd3fc;background:rgba(56,189,248,0.07);">ⓘ ') +
+        nearestRfNote + "</td></tr>";
+    }
     if (isEnDc && !isNrServing && !mrdcServingCells.length) {
       const nrPciDisplay = Number.isFinite(nrServingPci)
         ? String(nrServingPci)

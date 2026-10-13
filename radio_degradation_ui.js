@@ -122,7 +122,7 @@
     lte: true, nr: true, coverage: true, sinr: true, availability: true, mobility: true,
     mos: true, mosCorrelated: true, throughput: true,
     scope: "drive", band: "all", priority: "all", issue: "all", rca: "all", confidence: "all",
-    minPoints: 1, top: "20",
+    minPoints: 1, minPointsMos: 1, minPointsRsrp: 5, minPointsSinr: 5, top: "20",
   });
   const filtersFor = (log) => {
     const analysis = log?.radioDegradationAnalysis;
@@ -130,6 +130,10 @@
     // Stable reference: recreating the object on every call orphaned the
     // closure captured by refreshFilters, so no filter change ever applied.
     if (!analysis.viewFilters) analysis.viewFilters = defaultFilters();
+    // Fill missing keys in place (reference kept): partial snapshots such as
+    // { minPoints } — stored by the detection launch — keep every
+    // "Segments affichés" box checked by default instead of unchecked.
+    Object.assign(analysis.viewFilters, { ...defaultFilters(), ...analysis.viewFilters });
     return analysis.viewFilters;
   };
   const filteredRows = (log) => {
@@ -156,6 +160,15 @@
       if (filters.issue !== "all" && professional?.issueType !== filters.issue) return false;
       if (filters.rca !== "all" && professional?.rcaCode !== filters.rca) return false;
       if (filters.confidence !== "all" && professional?.rcaConfidenceClass !== filters.confidence) return false;
+      // Split minima: MOS rows use their bad-sample count, radio rows use
+      // their per-symptom support (either symptom suffices, as in detection).
+      const minMosPts = Math.max(1, Number(filters.minPointsMos) || 1);
+      const minRsrpPts = Math.max(1, Number(filters.minPointsRsrp) || 5);
+      const minSinrPts = Math.max(1, Number(filters.minPointsSinr) || 5);
+      if (row.type === "MOS_DEGRADATION") return Number(row.sampleCount || 0) >= minMosPts;
+      const covCount = Number(row.coverageSampleCount || 0);
+      const sinrCount = Number(row.sinrSampleCount || 0);
+      if (covCount > 0 || sinrCount > 0) return covCount >= minRsrpPts || sinrCount >= minSinrPts;
       return Number(row.sampleCount || 0) >= Math.max(1, Number(filters.minPoints) || 1);
     });
     // COP: chronological order (Top N keeps the N earliest per RAT).
@@ -473,7 +486,9 @@
             <label style="font-size:11px;color:#94a3b8;">LTE SINR ≤ (dB)<input id="radioLteSinr" type="number" step="0.5" style="display:block;width:96px;margin-top:4px;"></label>
             <label style="font-size:11px;color:#94a3b8;">NR RSRP ≤ (dBm)<input id="radioNrRsrp" type="number" step="0.5" style="display:block;width:96px;margin-top:4px;"></label>
             <label style="font-size:11px;color:#94a3b8;">NR SINR ≤ (dB)<input id="radioNrSinr" type="number" step="0.5" style="display:block;width:96px;margin-top:4px;"></label>
-            <label style="font-size:11px;color:#94a3b8;">Points dégradés min.<input id="radioMinPoints" type="number" min="1" step="1" style="display:block;width:90px;margin-top:4px;"></label>
+            <label style="font-size:11px;color:#94a3b8;">MOS Pts dégradés min.<input id="radioMinPointsMos" type="number" min="1" step="1" style="display:block;width:86px;margin-top:4px;"></label>
+            <label style="font-size:11px;color:#94a3b8;">RSRP Pts dégradés min.<input id="radioMinPointsRsrp" type="number" min="1" step="1" style="display:block;width:86px;margin-top:4px;"></label>
+            <label style="font-size:11px;color:#94a3b8;">SINR Pts dégradés min.<input id="radioMinPointsSinr" type="number" min="1" step="1" style="display:block;width:86px;margin-top:4px;"></label>
             <label style="font-size:11px;color:#94a3b8;">MOS &lt;<input id="radioMosThreshold" type="number" min="0" max="5" step="0.1" style="display:block;width:75px;margin-top:4px;"></label>
             <label style="font-size:11px;color:#94a3b8;">Milieu<select id="radioProfileEnvironment" style="display:block;width:110px;margin-top:4px;"><option value="">Auto</option><option value="URBAN">Urban</option><option value="HIGHWAY">Highway</option></select></label>
             <label style="font-size:11px;color:#94a3b8;">Usage<select id="radioProfilePurpose" style="display:block;width:90px;margin-top:4px;"><option value="">Auto</option><option value="VOICE">Voice</option><option value="DATA">Data</option></select></label>
@@ -500,7 +515,9 @@
             <label style="font-size:11px;color:#94a3b8;display:none;">Type<select id="radioFilterIssue" style="display:block;width:155px;margin-top:4px;"><option value="all">Tous</option><option value="coverage">Coverage</option><option value="quality">Quality</option><option value="coverage_quality">Coverage + Quality</option><option value="nr_availability_loss">NR Availability Loss</option><option value="mobility">Mobilité</option><option value="mos">MOS</option><option value="throughput">Débit DL</option></select></label>
             <label style="font-size:11px;color:#94a3b8;display:none;">RCA<select id="radioFilterRca" style="display:block;width:180px;margin-top:4px;"><option value="all">Toutes</option></select></label>
             <label style="font-size:11px;color:#94a3b8;display:none;">Confiance<select id="radioFilterConfidence" style="display:block;width:120px;margin-top:4px;"><option value="all">Toutes</option><option value="very_high">Très élevée</option><option value="high">Élevée</option><option value="medium">Moyenne</option><option value="low">Faible</option><option value="very_low">Très faible</option></select></label>
-            <label style="font-size:11px;color:#94a3b8;">Min. points<input id="radioFilterMinPoints" type="number" min="1" step="1" style="display:block;width:78px;margin-top:4px;"></label>
+            <label style="font-size:11px;color:#94a3b8;">MOS Min. points<input id="radioFilterMinPointsMos" type="number" min="1" step="1" style="display:block;width:70px;margin-top:4px;"></label>
+            <label style="font-size:11px;color:#94a3b8;">RSRP Min. points<input id="radioFilterMinPointsRsrp" type="number" min="1" step="1" style="display:block;width:70px;margin-top:4px;"></label>
+            <label style="font-size:11px;color:#94a3b8;">SINR Min. points<input id="radioFilterMinPointsSinr" type="number" min="1" step="1" style="display:block;width:70px;margin-top:4px;"></label>
             <label style="font-size:11px;color:#94a3b8;">Classement<select id="radioFilterTop" style="display:block;width:95px;margin-top:4px;"><option value="5">Top 5</option><option value="10">Top 10</option><option value="20">Top 20</option><option value="all">Tous</option></select></label>
             <button id="radioShowMap" class="btn" style="background:#0f766e;">Afficher sur la carte</button>
             <button id="radioExport" class="btn" style="background:#2563eb;display:none;">Exporter validations XLSX</button>
@@ -967,7 +984,7 @@
     const field = (id, label, value, step) =>
       `<label style="font-size:11px;color:#94a3b8;">${label}<input id="${id}" type="number" step="${step}" value="${value}" style="display:block;width:100%;margin-top:4px;box-sizing:border-box;padding:6px 7px;border:1px solid #475569;border-radius:4px;background:#111827;color:#f8fafc;"></label>`;
     modal.innerHTML = `
-      <div class="modal-content glass-modal-content" style="max-width:420px;">
+      <div class="modal-content glass-modal-content" style="max-width:480px;">
         <div class="modal-header glass-modal-header">
           <h3>Détection LTE / NR</h3>
           <span class="close" data-setup-close style="cursor:pointer;">&times;</span>
@@ -975,12 +992,14 @@
         <div class="modal-body glass-modal-body">
           <p class="form-hint" style="margin-bottom:10px;">Seuils de détection automatique pour <b>${escapeHtml(log.name || "")}</b></p>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-            ${field("radioSetupLteRsrp", "LTE RSRP ≤ (dBm)", num(defaults.lte?.coverageEntryDbm, -105), "0.5")}
+            ${field("radioSetupLteRsrp", "LTE RSRP ≤ (dBm)", -115, "0.5")}
             ${field("radioSetupLteSinr", "LTE SINR ≤ (dB)", num(defaults.lte?.sinrEntryDb, 0), "0.5")}
-            ${field("radioSetupNrRsrp", "NR RSRP ≤ (dBm)", num(defaults.nr?.coverageEntryDbm, -105), "0.5")}
+            ${field("radioSetupNrRsrp", "NR RSRP ≤ (dBm)", -115, "0.5")}
             ${field("radioSetupNrSinr", "NR SINR ≤ (dB)", num(defaults.nr?.sinrEntryDb, 0), "0.5")}
-            ${field("radioSetupMos", "MOS < (seuil)", 3.5, "0.1")}
-            ${field("radioSetupMinPoints", "Points dégradés min.", num(defaults.lte?.minDegradedSnapshots, 5), "1")}
+            ${field("radioSetupMos", "MOS < (seuil)", 2.2, "0.1")}
+            ${field("radioSetupMosMinPoints", "MOS Points dégradés min.", 1, "1")}
+            ${field("radioSetupRsrpMinPoints", "RSRP Points dégradés min.", 5, "1")}
+            ${field("radioSetupSinrMinPoints", "SINR Points dégradés min.", 5, "1")}
           </div>
           <div id="radioSetupStatus" style="font-size:11px;color:#94a3b8;margin-top:10px;"></div>
           <div class="editor-footer" style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end;">
@@ -990,6 +1009,20 @@
         </div>
       </div>`;
     document.body.appendChild(modal);
+    // Center over the Map View panel (not the full viewport): .modal-content
+    // defaults to absolute top-left placement.
+    try {
+      const mapEl = document.getElementById("map") || document.querySelector(".map-container");
+      const box = modal.querySelector(".modal-content");
+      if (mapEl && box) {
+        const r = mapEl.getBoundingClientRect();
+        const w = Math.min(box.offsetWidth || 420, Math.max(200, r.width - 16));
+        const h = Math.min(box.offsetHeight || 320, Math.max(200, r.height - 16));
+        box.style.margin = "0";
+        box.style.left = Math.max(8, Math.round(r.left + (r.width - w) / 2)) + "px";
+        box.style.top = Math.max(8, Math.round(r.top + (r.height - h) / 2)) + "px";
+      }
+    } catch (_) {}
     // Moveable popup (drag by header).
     try {
       const dragHeader = modal.querySelector(".modal-header");
@@ -1003,7 +1036,13 @@
     });
     modal.querySelector("[data-setup-launch]").onclick = async () => {
       const val = (id) => modal.querySelector("#" + id).value;
-      const min = Math.max(1, Number(val("radioSetupMinPoints")) || 5);
+      // Split minima: MOS drives mos.minSamples, RSRP/SINR drive
+      // coverageMinSamples/sinrMinSamples.  The combined segment gate uses
+      // the smaller of the two so no qualifiable segment is pre-filtered.
+      const minMos = Math.max(1, Number(val("radioSetupMosMinPoints")) || 1);
+      const minRsrp = Math.max(1, Number(val("radioSetupRsrpMinPoints")) || 5);
+      const minSinr = Math.max(1, Number(val("radioSetupSinrMinPoints")) || 5);
+      const minCombined = Math.max(1, Math.min(minRsrp, minSinr));
       const status = modal.querySelector("#radioSetupStatus");
       const launchBtn = modal.querySelector("[data-setup-launch]");
       const tracker = window.ProgressTracker;
@@ -1018,14 +1057,14 @@
         tracker?.update(20, "Snapshots radio…");
         await frame();
         const next = root.RadioDegradationAnalyzer.analyze(log.points, { profiles: {
-          lte: { coverageEntryDbm: val("radioSetupLteRsrp"), sinrEntryDb: val("radioSetupLteSinr"), minDegradedSnapshots: min },
-          nr: { coverageEntryDbm: val("radioSetupNrRsrp"), sinrEntryDb: val("radioSetupNrSinr"), minDegradedSnapshots: min },
-          mos: { degraded: Number(val("radioSetupMos")) || 3.5 },
+          lte: { coverageEntryDbm: val("radioSetupLteRsrp"), sinrEntryDb: val("radioSetupLteSinr"), coverageMinSamples: minRsrp, sinrMinSamples: minSinr, minDegradedSnapshots: minCombined },
+          nr: { coverageEntryDbm: val("radioSetupNrRsrp"), sinrEntryDb: val("radioSetupNrSinr"), coverageMinSamples: minRsrp, sinrMinSamples: minSinr, minDegradedSnapshots: minCombined },
+          mos: { degraded: Number(val("radioSetupMos")) || 2.2, minSamples: minMos },
         } });
         tracker?.update(55, `Incidents détectés : ${(next.summary?.lteCandidates || 0) + (next.summary?.nrCandidates || 0)} radio, ${next.summary?.mosCandidates || 0} MOS…`);
         await frame();
         preserveReviewStates(previousAnalysis, next);
-        next.viewFilters = { ...(previousAnalysis?.viewFilters || {}), minPoints: min };
+        next.viewFilters = { ...(previousAnalysis?.viewFilters || {}), minPoints: minCombined, minPointsMos: minMos, minPointsRsrp: minRsrp, minPointsSinr: minSinr };
         log.radioDegradationAnalysis = next;
         try {
           const s = next.summary || {};
@@ -1074,12 +1113,14 @@
     const filters = filtersFor(log);
     const q = (id) => modal.querySelector(id);
     q("#radioDegradationTitle").textContent = `Analyse automatique radio 4G/5G + MOS — ${log.name}`;
-    q("#radioLteRsrp").value = profiles.lte?.coverageEntryDbm ?? -105;
+    q("#radioLteRsrp").value = profiles.lte?.coverageEntryDbm ?? -115;
     q("#radioLteSinr").value = profiles.lte?.sinrEntryDb ?? 0;
-    q("#radioNrRsrp").value = profiles.nr?.coverageEntryDbm ?? -105;
+    q("#radioNrRsrp").value = profiles.nr?.coverageEntryDbm ?? -115;
     q("#radioNrSinr").value = profiles.nr?.sinrEntryDb ?? 0;
-    q("#radioMinPoints").value = profiles.lte?.minDegradedSnapshots ?? 5;
-    q("#radioMosThreshold").value = profiles.mos?.degraded ?? 3.5;
+    q("#radioMinPointsMos").value = profiles.mos?.minSamples ?? 1;
+    q("#radioMinPointsRsrp").value = profiles.lte?.coverageMinSamples ?? 5;
+    q("#radioMinPointsSinr").value = profiles.lte?.sinrMinSamples ?? 5;
+    q("#radioMosThreshold").value = profiles.mos?.degraded ?? 2.2;
     q("#radioProfileEnvironment").value = analysis.profileContext?.environment || "";
     q("#radioProfilePurpose").value = analysis.profileContext?.purpose || "";
     q("#radioProfileBand").value = analysis.profileContext?.band || "";
@@ -1100,7 +1141,9 @@
     q("#radioFilterIssue").value = filters.issue || "all";
     q("#radioFilterRca").value = filters.rca || "all";
     q("#radioFilterConfidence").value = filters.confidence || "all";
-    q("#radioFilterMinPoints").value = filters.minPoints;
+    q("#radioFilterMinPointsMos").value = filters.minPointsMos ?? 1;
+    q("#radioFilterMinPointsRsrp").value = filters.minPointsRsrp ?? 5;
+    q("#radioFilterMinPointsSinr").value = filters.minPointsSinr ?? 5;
     q("#radioFilterTop").value = filters.top;
     q("#radioDegradationDate").value = exportMeta.date || "";
     const testTypeSelect = q("#radioDegradationTestType");
@@ -1256,36 +1299,55 @@
         issue: q("#radioFilterIssue").value,
         rca: q("#radioFilterRca").value,
         confidence: q("#radioFilterConfidence").value,
-        minPoints: Math.max(1, Number(q("#radioFilterMinPoints").value) || 1),
+        minPoints: Math.max(1, Math.min(Number(q("#radioFilterMinPointsMos").value) || 1, Number(q("#radioFilterMinPointsRsrp").value) || 5, Number(q("#radioFilterMinPointsSinr").value) || 5)),
+        minPointsMos: Math.max(1, Number(q("#radioFilterMinPointsMos").value) || 1),
+        minPointsRsrp: Math.max(1, Number(q("#radioFilterMinPointsRsrp").value) || 5),
+        minPointsSinr: Math.max(1, Number(q("#radioFilterMinPointsSinr").value) || 5),
         top: q("#radioFilterTop").value,
       });
       renderRows();
     };
-    ["#radioFilterLte", "#radioFilterNr", "#radioFilterCoverage", "#radioFilterSinr", "#radioFilterAvailability", "#radioFilterMobility", "#radioFilterMos", "#radioFilterMosCorrelated", "#radioFilterThroughput", "#radioFilterScope", "#radioFilterBand", "#radioFilterPriority", "#radioFilterIssue", "#radioFilterRca", "#radioFilterConfidence", "#radioFilterMinPoints", "#radioFilterTop"].forEach((selector) => { q(selector).onchange = refreshFilters; });
-    // Min. points reacts while typing (change alone needs blur/Enter).
-    const minPointsInput = q("#radioFilterMinPoints");
-    if (minPointsInput) {
+    ["#radioFilterLte", "#radioFilterNr", "#radioFilterCoverage", "#radioFilterSinr", "#radioFilterAvailability", "#radioFilterMobility", "#radioFilterMos", "#radioFilterMosCorrelated", "#radioFilterThroughput", "#radioFilterScope", "#radioFilterBand", "#radioFilterPriority", "#radioFilterIssue", "#radioFilterRca", "#radioFilterConfidence", "#radioFilterMinPointsMos", "#radioFilterMinPointsRsrp", "#radioFilterMinPointsSinr", "#radioFilterTop"].forEach((selector) => { q(selector).onchange = refreshFilters; });
+    // Min. points react while typing (change alone needs blur/Enter).
+    ["#radioFilterMinPointsMos", "#radioFilterMinPointsRsrp", "#radioFilterMinPointsSinr"].forEach((selector) => {
+      const minPointsInput = q(selector);
+      if (!minPointsInput) return;
       let minPointsTimer = null;
       minPointsInput.addEventListener("input", () => {
         if (minPointsTimer) clearTimeout(minPointsTimer);
         minPointsTimer = setTimeout(refreshFilters, 350);
       });
-    }
-    // Detection "Points dégradés min." drives the display "Min. points" filter.
-    const detMinPointsInput = q("#radioMinPoints");
-    if (detMinPointsInput) {
+    });
+    // Detection minima drive their display "Min. points" counterpart each.
+    const detMinPairs = [
+      ["#radioMinPointsMos", "#radioFilterMinPointsMos", 1],
+      ["#radioMinPointsRsrp", "#radioFilterMinPointsRsrp", 5],
+      ["#radioMinPointsSinr", "#radioFilterMinPointsSinr", 5],
+    ];
+    if (detMinPairs.some(([source]) => q(source))) {
       let detMinTimer = null;
       const syncDetMinToFilter = () => {
-        const target = q("#radioFilterMinPoints");
-        if (target && target.value !== detMinPointsInput.value) {
-          target.value = detMinPointsInput.value;
-          refreshFilters();
-        }
+        let changed = false;
+        detMinPairs.forEach(([source, target, fallback]) => {
+          const sourceEl = q(source);
+          const targetEl = q(target);
+          if (!sourceEl || !targetEl) return;
+          const value = Math.max(1, Number(sourceEl.value) || fallback);
+          if (Number(targetEl.value) !== value) {
+            targetEl.value = value;
+            changed = true;
+          }
+        });
+        if (changed) refreshFilters();
       };
-      detMinPointsInput.addEventListener("change", syncDetMinToFilter);
-      detMinPointsInput.addEventListener("input", () => {
-        if (detMinTimer) clearTimeout(detMinTimer);
-        detMinTimer = setTimeout(syncDetMinToFilter, 400);
+      detMinPairs.forEach(([source]) => {
+        const sourceEl = q(source);
+        if (!sourceEl) return;
+        sourceEl.addEventListener("change", syncDetMinToFilter);
+        sourceEl.addEventListener("input", () => {
+          if (detMinTimer) clearTimeout(detMinTimer);
+          detMinTimer = setTimeout(syncDetMinToFilter, 400);
+        });
       });
     }
     q("#radioShowMap").onclick = () => { refreshFilters(); showRadioSegmentsOnMap(log); };
@@ -1325,12 +1387,15 @@
     };
     q("#radioRecalculate").onclick = () => {
       const previous = log.radioDegradationAnalysis;
-      const min = Math.max(1, Number(q("#radioMinPoints").value) || 5);
+      const minMos = Math.max(1, Number(q("#radioMinPointsMos").value) || 1);
+      const minRsrp = Math.max(1, Number(q("#radioMinPointsRsrp").value) || 5);
+      const minSinr = Math.max(1, Number(q("#radioMinPointsSinr").value) || 5);
+      const minCombined = Math.max(1, Math.min(minRsrp, minSinr));
       const profilesRequest = {
-        lte: { coverageEntryDbm: q("#radioLteRsrp").value, sinrEntryDb: q("#radioLteSinr").value, minDegradedSnapshots: min },
-        nr: { coverageEntryDbm: q("#radioNrRsrp").value, sinrEntryDb: q("#radioNrSinr").value, minDegradedSnapshots: min },
+        lte: { coverageEntryDbm: q("#radioLteRsrp").value, sinrEntryDb: q("#radioLteSinr").value, coverageMinSamples: minRsrp, sinrMinSamples: minSinr, minDegradedSnapshots: minCombined },
+        nr: { coverageEntryDbm: q("#radioNrRsrp").value, sinrEntryDb: q("#radioNrSinr").value, coverageMinSamples: minRsrp, sinrMinSamples: minSinr, minDegradedSnapshots: minCombined },
       };
-      profilesRequest.mos = { degraded: Number(q("#radioMosThreshold").value) || 3.5 };
+      profilesRequest.mos = { degraded: Number(q("#radioMosThreshold").value) || 2.2, minSamples: minMos };
       const profileContext = {
         environment: q("#radioProfileEnvironment").value,
         purpose: q("#radioProfilePurpose").value,
