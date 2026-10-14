@@ -18,7 +18,7 @@
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script defer src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
     <script defer src="https://unpkg.com/@turf/turf/turf.min.js"></script>
-<link rel="stylesheet" href="style.css?v=67">
+<link rel="stylesheet" href="style.css?v=68">
     <link rel="stylesheet" href="cesium_map.css?v=1">
     <link rel="stylesheet" href="grid_styles.css?v=2">
     <link rel="stylesheet" href="additional_styles.css?v=3">
@@ -1486,6 +1486,31 @@
         </div>
     </div>
 
+    <!-- DT Day Picker Modal (multi-day import: user confirms the drive day to load) -->
+    <div id="dtSessionModal" class="modal modal-centered">
+        <div class="modal-content glass-modal-content dt-day-modal">
+            <div class="modal-header glass-modal-header">
+                <h3>Choisir la journée du DT</h3>
+                <span class="close"
+                    onclick="document.getElementById('dtSessionModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body">
+                <div id="dtDayFileName" class="dt-day-filename"></div>
+                <p class="modal-subtext modal-subtext-clean">Ce fichier contient plusieurs journées. La sélection s'applique à la carte, aux statistiques, à la détection, à l'IA et aux exports.</p>
+                <label class="dt-day-label" for="dtDaySelect">Journée (heure du fichier)</label>
+                <select id="dtDaySelect" class="dt-day-select"></select>
+                <div id="dtDayInterval" class="dt-day-interval"></div>
+                <div id="dtDayInfo" class="dt-day-info"></div>
+                <p class="dt-day-note">Le fichier source reste inchangé. Les autres journées restent disponibles via « Journées » pendant cette session ; après rechargement, réimportez le fichier source.</p>
+                <p class="dt-day-note">La date proposée doit être confirmée. Aucune mesure n'a encore été chargée sur la carte.</p>
+                <div class="dt-day-actions">
+                    <button id="btnDtDayCancel" class="btn dt-day-btn-ghost" type="button">Annuler</button>
+                    <button id="btnDtDayLoad" class="btn dt-day-btn-primary" type="button">Charger la journée</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Import Choice Modal -->
     <!-- Import Choice Modal -->
     <div id="importModal" class="modal modal-centered">
@@ -1570,7 +1595,7 @@
     <script defer src="benchmark_nemo_ui_state.js?v=1"></script>
     <script defer src="theme_v2.js?v=v598"></script>
     <script defer src="window_manager.js?v=4"></script>
-    <script defer src="app.js?v=v910"></script>
+    <script defer src="app.js?v=v914"></script>
     <script defer src="radio_dt_cop_export.js?v=20"></script>
     <script defer src="radio_degradation_ui.js?v=45"></script>
     <!-- User Point Modal -->
