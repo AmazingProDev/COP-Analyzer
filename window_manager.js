@@ -202,13 +202,14 @@ class FloatingWindowManager {
       const parentW = win.offsetParent ? win.offsetParent.clientWidth : window.innerWidth;
       const parentH = win.offsetParent ? win.offsetParent.clientHeight : window.innerHeight;
 
-      // Clamp to bounds
+      // Clamp to bounds — never above the app header bottom.
+      const topLimit = (typeof window.copWorkspaceTop === "function") ? window.copWorkspaceTop() : 0;
       if (newL < 0) newL = 0;
-      if (newT < 0) newT = 0;
+      if (newT < topLimit) newT = topLimit;
       if (newL + winW > parentW)
         newL = Math.max(0, parentW - winW);
       if (newT + winH > parentH)
-        newT = Math.max(0, parentH - winH);
+        newT = Math.max(topLimit, parentH - winH);
 
       win.style.left = newL + "px";
       win.style.top = newT + "px";
@@ -282,14 +283,15 @@ class FloatingWindowManager {
       const parentW = win.offsetParent ? win.offsetParent.clientWidth : window.innerWidth;
       const parentH = win.offsetParent ? win.offsetParent.clientHeight : window.innerHeight;
 
-      // Clamp to bounds
+      // Clamp to bounds — north edge never above the app header bottom.
+      const topLimit = (typeof window.copWorkspaceTop === "function") ? window.copWorkspaceTop() : 0;
       if (newL < 0) {
         newW += newL;
         newL = 0;
       }
-      if (newT < 0) {
-        newH += newT;
-        newT = 0;
+      if (newT < topLimit) {
+        newH += (newT - topLimit);
+        newT = topLimit;
       }
       if (newL + newW > parentW) {
         newW = parentW - newL;
@@ -326,10 +328,12 @@ class FloatingWindowManager {
         win.dataset.prevWidth = win.style.width;
         win.dataset.prevHeight = win.style.height;
         win.classList.add("maximized");
+        // Maximized fills the workspace below the app header, never over it.
+        const maxTop = (typeof window.copWorkspaceTop === "function") ? window.copWorkspaceTop() : 0;
         win.style.left = "0px";
-        win.style.top = "0px";
+        win.style.top = maxTop + "px";
         win.style.width = "100%";
-        win.style.height = "100%";
+        win.style.height = "calc(100% - " + maxTop + "px)";
       }
     });
 
@@ -363,6 +367,19 @@ class FloatingWindowManager {
   }
 }
 
+// Workspace top limit: no floating window may be dragged, resized or
+// maximized above the bottom of the app header (#mainHeader).
+window.copWorkspaceTop = function () {
+  try {
+    const h = document.getElementById("mainHeader");
+    if (h) {
+      const r = h.getBoundingClientRect();
+      if (r && Number.isFinite(r.bottom) && r.bottom > 0) return Math.round(r.bottom);
+    }
+  } catch (e) {}
+  return 60;
+};
+
 // Global instance
 window.WM = new FloatingWindowManager();
 
@@ -371,7 +388,8 @@ document.addEventListener("DOMContentLoaded", () => {
     // Viewport-anchored windows: common top origin below the app header
     // so Logs / Map / DT Layers always align.
     const headerEl = document.getElementById("mainHeader");
-    const topOrigin = Math.round((headerEl ? headerEl.getBoundingClientRect().height : 60) + 10) + "px";
+    const topLimitNum = headerEl ? Math.round(headerEl.getBoundingClientRect().height) : 60;
+    const topOrigin = (topLimitNum + 10) + "px";
     try {
       const sidebar = document.getElementById("logs-sidebar");
       if (sidebar) {
@@ -455,7 +473,7 @@ document.addEventListener("DOMContentLoaded", () => {
         "5G Benchmark Analysis",
         {
           x: Math.max(8, Math.round((window.innerWidth - benchmarkWidth) / 2)),
-          y: Math.max(8, Math.round((window.innerHeight - benchmarkHeight) / 2)),
+          y: Math.max(topLimitNum, Math.round((window.innerHeight - benchmarkHeight) / 2)),
           width: benchmarkWidth,
           height: benchmarkHeight,
           hidden: true,

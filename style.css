@@ -700,19 +700,83 @@ main {
     box-shadow: 0 0 10px rgba(43, 179, 163, 0.4);
 }
 
-/* Helper for centered modals (like KML export choice) */
-.modal-centered .modal-content {
+/* Helper for centered modals (like KML export choice).
+   Specificity beats the `.modal[style*="display: ..."] .modal-content`
+   open-transition rule so the centering translate survives opening.
+   No !important: inline left/top set while dragging must win. */
+.modal-centered .modal-content,
+.modal.modal-centered[style*="display: block"] .modal-content,
+.modal.modal-centered[style*="display: flex"] .modal-content {
     position: absolute;
-    top: 50% !important;
-    left: 50% !important;
-    transform: translate(-50%, -50%) !important;
-    margin: 0 !important;
-    resize: none !important;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    margin: 0;
+    resize: none;
     /* Usually don't want to resize choice modals */
-    height: auto !important;
+    height: auto;
     /* Let content dictate height */
-    width: auto !important;
+    width: auto;
     min-width: 400px;
+    max-width: 92vw;
+}
+
+/* Draggable affordance for the export popup header */
+#exportKmlModal .glass-modal-header {
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+}
+
+#exportKmlModal .glass-modal-header:active {
+    cursor: grabbing;
+}
+
+/* Keep the export popup inside the viewport: centered top edge stays
+   below the app header, and the body scrolls if content grows. */
+#exportKmlModal .modal-content {
+    max-height: min(88vh, calc(100vh - 140px));
+}
+
+#exportKmlModal .glass-modal-body {
+    max-height: min(calc(88vh - 70px), calc(100vh - 210px));
+}
+
+/* Export popup compact mode (~-25% height): tighter spacing, buttons
+   side-by-side, shorter DT layer list. */
+#exportKmlModal .glass-modal-header {
+    padding: 12px 18px;
+}
+
+#exportKmlModal .glass-modal-body {
+    padding: 14px 18px;
+    gap: 10px;
+}
+
+#exportKmlModal .modal-subtext {
+    margin: 0;
+}
+
+#exportKmlModal .glass-btn-group {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+#exportKmlModal .glass-btn-group .btn {
+    flex: 1 1 140px;
+    width: auto;
+    padding: 9px 10px;
+    font-size: 13px;
+    text-align: center;
+    justify-content: center;
+}
+
+#exportKmlModal #dtKmlLayerList {
+    max-height: 120px;
+    margin: 4px 0;
 }
 
 /* Close Button */

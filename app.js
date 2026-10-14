@@ -30635,6 +30635,12 @@ document.addEventListener("DOMContentLoaded", () => {
         kmlBtn.onclick = (e) => {
           e.preventDefault();
           e.stopPropagation();
+          if (typeof window.ensureExportKmlDraggable === "function") {
+            try { window.ensureExportKmlDraggable(); } catch (err) {}
+          }
+          if (typeof window.centerExportKmlModal === "function") {
+            try { window.centerExportKmlModal(); } catch (err) {}
+          }
           const modal = document.getElementById("exportKmlModal");
           if (modal) modal.style.display = "block";
           if (typeof window.refreshDtKmlLayerList === "function") {
@@ -32065,18 +32071,20 @@ document.addEventListener("DOMContentLoaded", () => {
       let newLeft = initialLeft + dx;
       let newTop = initialTop + dy;
 
-      // Bounds Checking
+      // Bounds Checking — clamped so the box can never leave the
+      // viewport, and never above the app header bottom.
       const rect = containerEl.getBoundingClientRect();
       const winW = window.innerWidth;
       const winH = window.innerHeight;
+      const minTop = (typeof window.copWorkspaceTop === "function") ? window.copWorkspaceTop() : 0;
 
       // Prevent dragging off left/right
       if (newLeft < 0) newLeft = 0;
-      if (newLeft + rect.width > winW) newLeft = winW - rect.width;
+      if (newLeft + rect.width > winW) newLeft = Math.max(0, winW - rect.width);
 
-      // Prevent dragging off top/bottom
-      if (newTop < 0) newTop = 0;
-      if (newTop + rect.height > winH) newTop = winH - rect.height;
+      // Prevent dragging off top (header) / bottom
+      if (newTop < minTop) newTop = minTop;
+      if (newTop + rect.height > winH) newTop = Math.max(minTop, winH - rect.height);
 
       // Set new position
       containerEl.style.left = newLeft + "px";
@@ -32101,6 +32109,49 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Expose to window for global access
   window.makeElementDraggable = makeElementDraggable;
+
+  // Export popup: centered by default (pure CSS), draggable via header.
+  // Centering uses top:50%/left:50% + translate(-50%,-50%). On first
+  // drag we freeze the current box into inline left/top and drop the
+  // translate so makeElementDraggable (left/top based) stays exact.
+  window.centerExportKmlModal = () => {
+    const modal = document.getElementById("exportKmlModal");
+    if (!modal) return;
+    const content = modal.querySelector(".modal-content");
+    if (!content) return;
+    content.style.left = "";
+    content.style.top = "";
+    content.style.transform = "";
+    content.style.margin = "";
+    content.style.transition = "";
+    delete content.dataset.exportDragged;
+  };
+  window.ensureExportKmlDraggable = () => {
+    const modal = document.getElementById("exportKmlModal");
+    if (!modal || modal.dataset.exportDragInit === "true") return;
+    const content = modal.querySelector(".modal-content");
+    const header = modal.querySelector(".glass-modal-header, .modal-header");
+    if (!content || !header) return;
+    // Capture phase: runs before makeElementDraggable's own mousedown
+    // handler, so the translate -> inline position swap is seamless.
+    header.addEventListener("mousedown", () => {
+      if (content.dataset.exportDragged === "true") return;
+      try {
+        const rect = content.getBoundingClientRect();
+        content.style.left = rect.left + "px";
+        content.style.top = rect.top + "px";
+        content.style.transform = "none";
+        content.style.margin = "0";
+        content.style.transition = "none";
+        content.dataset.exportDragged = "true";
+      } catch (e) {}
+    }, true);
+    try {
+      header.style.cursor = "grab";
+      makeElementDraggable(header, content);
+    } catch (e) {}
+    modal.dataset.exportDragInit = "true";
+  };
 
   // Helper: Make analysis modals draggable + ensure top layer
   window.attachAnalysisDrag = (overlayEl) => {
@@ -42527,6 +42578,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const _exportBtn = document.getElementById("exportKmlBtn");
     if (_exportBtn) {
       _exportBtn.onclick = () => {
+        if (typeof window.ensureExportKmlDraggable === "function") {
+          try { window.ensureExportKmlDraggable(); } catch (e) {}
+        }
+        if (typeof window.centerExportKmlModal === "function") {
+          try { window.centerExportKmlModal(); } catch (e) {}
+        }
         const modal = document.getElementById("exportKmlModal");
         if (modal) modal.style.display = "block";
         if (typeof window.refreshDtKmlLayerList === "function") {
@@ -85921,14 +85978,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       .catch(() => {});
   }
 
-  // COP LITE: BDD (200k+ sectors) loads only after login so the landing
-  // gate stays interactive; the event is dispatched by revealApp().
-  // The short delay lets the login transition paint before the fetch starts.
-  if (window.COP_LITE) {
-    window.addEventListener("cop:authed", () => setTimeout(_loadBddOnStartup, 350), { once: true });
-  } else {
-    setTimeout(_loadBddOnStartup, 350);
-  }
+  // No BDD auto-load by design: the user imports it explicitly via
+  // "Update BDD" (bddUpdateInput) or File > Import > Sites.
+  // _loadBddOnStartup stays available for a manual reload if needed.
+  window.reloadBddFromCaches = () => _loadBddOnStartup();
 
   const bddUpdateInput = document.getElementById("bddUpdateInput");
   if (bddUpdateInput) {
