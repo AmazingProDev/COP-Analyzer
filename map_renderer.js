@@ -2925,7 +2925,7 @@ class MapRenderer {
                     shapeLayer.__sectorRange = range;
                     shapeLayer.__sectorBeamwidth = beam;
                     shapeLayer.bindTooltip(`
-                        <strong>${escapeMapHtml(s.name || 'Unknown Site')}</strong><br>
+                        <strong>${escapeMapHtml(s.name || s.cellName || 'Unknown Site')}</strong><br>
                         Cell: ${escapeMapHtml(s.cellId || '-')} &nbsp;|&nbsp; Az: ${escapeMapHtml(azimuth)}° &nbsp;|&nbsp; ${escapeMapHtml(s.tech || '-')}
                     `, { sticky: true, opacity: 0.9 });
 
@@ -2938,7 +2938,7 @@ class MapRenderer {
                         }
                         shapeLayer.bindPopup(`
                             <div style="font-family:sans-serif;font-size:13px;">
-                                <strong>${escapeMapHtml(s.name || 'Unknown Site')}</strong><br>
+                                <strong>${escapeMapHtml(s.name || s.cellName || 'Unknown Site')}</strong><br>
                                 Cell: ${escapeMapHtml(s.cellId || '-')}<br>
                                 Azimuth: ${escapeMapHtml(azimuth)}°<br>
                                 Tech: ${escapeMapHtml(s.tech || '-')}<br>
@@ -3533,9 +3533,19 @@ class MapRenderer {
         }
         if (Array.isArray(this.siteData)) this.siteData.forEach((x) => { if (x) all.push(x); });
         // Same physical sector = same site + same azimuth (exact degree match).
+        // A sector without any site name must NEVER match the whole database:
+        // fall back to co-located coordinates only.
         const same = all.filter((x) => {
             if (x === s) return true;
-            const sameSite = siteKey ? norm(x.siteName || x.name) === siteKey : true;
+            let sameSite = false;
+            if (siteKey) {
+                sameSite = norm(x.siteName || x.name) === siteKey;
+            } else {
+                const la1 = Number(x.lat), lo1 = Number(x.lng);
+                sameSite = Number.isFinite(la1) && Number.isFinite(lo1) &&
+                    Math.abs(la1 - Number(s.lat)) < 0.0005 && Math.abs(lo1 - Number(s.lng)) < 0.0005;
+                if (!sameSite) return false;
+            }
             if (!sameSite) {
                 const la1 = Number(x.lat), lo1 = Number(x.lng);
                 if (!(Number.isFinite(la1) && Number.isFinite(lo1) &&
@@ -3605,14 +3615,19 @@ class MapRenderer {
             });
         });
         rows.sort((a, b) => (a.rat === b.rat ? 0 : (a.rat === '5G' ? -1 : 1)));
+        // Safety cap: a sector popup must stay readable even if the
+        // underlying match ever degrades again.
+        const MAX_SECTOR_ROWS = 100;
+        const hiddenCount = Math.max(0, rows.length - MAX_SECTOR_ROWS);
+        const shownRows = hiddenCount ? rows.slice(0, MAX_SECTOR_ROWS) : rows;
         let html = '<div style="font-family:sans-serif;min-width:230px;max-width:340px;">';
         if (Number.isFinite(az0)) {
             html += '<div style="font-size:10px;font-weight:700;color:#888;letter-spacing:.05em;margin-bottom:3px;">SECTEUR ' + esc(Math.round(az0)) + '°</div>';
         }
-        if (!rows.length) {
+        if (!shownRows.length) {
             html += '<div style="font-size:12px;color:#888;">Aucune bande identifiée pour ce secteur.</div>';
         } else {
-            html += rows.map((r) =>
+            html += shownRows.map((r) =>
                 '<div style="display:flex;gap:6px;align-items:baseline;font-size:12px;padding:3px 0;border-bottom:1px solid #eee;">' +
                 '<span style="font-size:10px;font-weight:700;color:#fff;background:' + (r.rat === '5G' ? '#7c3aed' : '#2563eb') + ';border-radius:4px;padding:1px 6px;">' + r.rat + '</span>' +
                 '<span style="font-weight:700;min-width:44px;">' + esc(r.label) + '</span>' +
@@ -3620,6 +3635,9 @@ class MapRenderer {
                 '<span>PCI <b>' + esc(r.pci) + '</b></span>' +
                 (r.cell ? '<span style="color:#888;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(r.cell) + '</span>' : '') +
                 '</div>').join('');
+            if (hiddenCount) {
+                html += '<div style="font-size:11px;color:#888;padding-top:4px;">+' + hiddenCount + ' autres…</div>';
+            }
         }
         html += '</div>';
         shapeLayer.bindPopup(html, { maxWidth: 360, closeButton: true });

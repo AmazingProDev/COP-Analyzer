@@ -62322,223 +62322,6 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     }
 
     function handleParsedResult(result, fileName) {
-      // ── Multi-day split ──────────────────────────────────────────────
-      // One export file can hold weeks of drives (collection tools append to
-      // the same filename). Points are grouped by calendar day (file time);
-      // one day = one DT to load. Tiny fragments (<10 pts) merge into the
-      // nearest day so stray timestamps never spam the picker.
-      const DT_DAY_MIN_PTS = 10;
-      function dtSessionTimeMs(p) {
-        if (!p) return NaN;
-        if (Number.isFinite(p.timeMs)) return p.timeMs;
-        const raw = p.time ?? (p.properties && p.properties.Time) ?? p.timestamp ?? p.datetime;
-        if (raw instanceof Date) {
-          const t = raw.getTime();
-          return Number.isFinite(t) ? t : NaN;
-        }
-        if (typeof raw === "number" && Number.isFinite(raw)) {
-          if (raw >= 1e12) return raw; // epoch ms
-          if (raw >= 1e9) return raw * 1000; // epoch s
-          return NaN;
-        }
-        if (typeof raw === "string") {
-          const s = raw.trim();
-          if (!s) return NaN;
-          let ms = Date.parse(s);
-          if (Number.isNaN(ms)) {
-            const m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?/);
-            if (m) {
-              ms = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0), +((m[7] || "0").padEnd(3, "0"))).getTime();
-            }
-          }
-          return Number.isFinite(ms) ? ms : NaN;
-        }
-        return NaN;
-      }
-      function dtDayKey(ms) {
-        const d = new Date(ms);
-        const pad2 = (n) => String(n).padStart(2, "0");
-        return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-      }
-      function dtDayLabel(key) {
-        const m = String(key || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
-        return m ? `${m[3]}/${m[2]}/${m[1]}` : String(key || "?");
-      }
-      function groupDtDays(points) {
-        const single = () => [{ key: null, label: null, t0: NaN, t1: NaN, points: (points || []).slice() }];
-        if (!Array.isArray(points) || points.length < 2) return single();
-        const timed = [];
-        points.forEach((p, i) => {
-          const t = dtSessionTimeMs(p);
-          if (Number.isFinite(t)) timed.push({ i, t });
-        });
-        if (!timed.length) return single();
-        timed.sort((a, b) => a.t - b.t);
-        const dayOf = new Array(points.length).fill(null);
-        timed.forEach(({ i, t }) => { dayOf[i] = dtDayKey(t); });
-        // Untimed points inherit the day of the closest timed neighbour.
-        const leftIdx = new Array(points.length).fill(-1);
-        let li = -1;
-        for (let i = 0; i < points.length; i++) { if (dayOf[i] !== null) li = i; leftIdx[i] = li; }
-        const rightIdx = new Array(points.length).fill(-1);
-        let ri = -1;
-        for (let i = points.length - 1; i >= 0; i--) { if (dayOf[i] !== null) ri = i; rightIdx[i] = ri; }
-        for (let i = 0; i < points.length; i++) {
-          if (dayOf[i] !== null) continue;
-          const l = leftIdx[i], r = rightIdx[i];
-          if (l < 0 && r < 0) continue;
-          else if (l < 0) dayOf[i] = dayOf[r];
-          else if (r < 0) dayOf[i] = dayOf[l];
-          else dayOf[i] = (i - l <= r - i) ? dayOf[l] : dayOf[r];
-        }
-        const buckets = new Map();
-        points.forEach((p, i) => {
-          const k = dayOf[i];
-          if (k === null) return;
-          if (!buckets.has(k)) buckets.set(k, []);
-          buckets.get(k).push(i);
-        });
-        if (!buckets.size) return single();
-        // Nearest-day merge for tiny fragments.
-        const keys = Array.from(buckets.keys()).sort();
-        const big = keys.filter((k) => buckets.get(k).length >= DT_DAY_MIN_PTS);
-        const refs = big.length ? big : keys.slice(0, 1);
-        if (!refs.length) return single();
-        const refTime = {};
-        refs.forEach((k) => {
-          const ts = buckets.get(k).map((i) => dtSessionTimeMs(points[i])).filter((t) => Number.isFinite(t)).sort((a, b) => a - b);
-          refTime[k] = ts.length ? ts[Math.floor(ts.length / 2)] : NaN;
-        });
-        keys.forEach((k) => {
-          if (refs.includes(k)) return;
-          const ts = buckets.get(k).map((i) => dtSessionTimeMs(points[i])).filter((t) => Number.isFinite(t));
-          const mid = ts.length ? ts.sort((a, b) => a - b)[Math.floor(ts.length / 2)] : NaN;
-          let best = refs[0], bd = Infinity;
-          refs.forEach((r) => {
-            const d = (Number.isFinite(mid) && Number.isFinite(refTime[r])) ? Math.abs(mid - refTime[r]) : Infinity;
-            if (d < bd) { bd = d; best = r; }
-          });
-          buckets.get(best).push(...buckets.get(k));
-          buckets.delete(k);
-        });
-        const ordered = Array.from(buckets.keys()).sort();
-        if (ordered.length <= 1) {
-          // Single day effectively — keep original order, no modal.
-          return single();
-        }
-        return ordered.map((k) => {
-          const idxs = buckets.get(k);
-          const list = idxs.map((i) => ({ i, t: dtSessionTimeMs(points[i]) }))
-            .sort((a, b) => {
-              const af = Number.isFinite(a.t), bf = Number.isFinite(b.t);
-              if (af && bf) return a.t - b.t || a.i - b.i;
-              if (af) return -1;
-              if (bf) return 1;
-              return a.i - b.i;
-            }).map((x) => points[x.i]);
-          const ts = list.map((p) => dtSessionTimeMs(p)).filter((t) => Number.isFinite(t));
-          return {
-            key: k,
-            label: dtDayLabel(k),
-            t0: ts.length ? Math.min(...ts) : NaN,
-            t1: ts.length ? Math.max(...ts) : NaN,
-            points: list,
-          };
-        });
-      }
-      // Session picker: the user chooses which detected drive(s) to LOAD.
-      // Nothing is ingested before Apply; closing loads the latest only.
-      // Day picker (maquette "Choisir la journée du DT"): one day per log,
-      // nothing loaded until confirmed. Other days stay available in-session
-      // via the log's "Journées" switcher.
-      function openDtDayPicker(fileLabel, dayGroups, onConfirm, onCancel) {
-        const modal = document.getElementById("dtSessionModal");
-        const sel = document.getElementById("dtDaySelect");
-        const intervalEl = document.getElementById("dtDayInterval");
-        const infoEl = document.getElementById("dtDayInfo");
-        const nameEl = document.getElementById("dtDayFileName");
-        if (!modal || !sel || typeof onConfirm !== "function") return;
-        const items = (dayGroups || []).filter((g) => g && g.points && g.points.length);
-        if (!items.length) return;
-        let confirmed = false;
-        const total = items.reduce((sum, g) => sum + g.points.length, 0);
-        const pad2 = (n) => String(n).padStart(2, "0");
-        const fmtHMS = (ms) => {
-          if (!Number.isFinite(ms)) return "--:--:--";
-          const d = new Date(ms);
-          return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
-        };
-        const fmtInt = (n) => Number(n || 0).toLocaleString("fr-FR");
-        if (nameEl) nameEl.textContent = fileLabel || "";
-        sel.innerHTML = "";
-        items.forEach((g, idx) => {
-          const opt = document.createElement("option");
-          opt.value = String(idx);
-          opt.textContent = `${g.label} — ${fmtInt(g.points.length)} points`;
-          if (idx === items.length - 1) opt.selected = true; // latest proposed
-          sel.appendChild(opt);
-        });
-        const refreshDayInfo = () => {
-          const g = items[Number(sel.value)] || items[items.length - 1];
-          if (intervalEl) intervalEl.textContent = `Intervalle : ${fmtHMS(g.t0)} — ${fmtHMS(g.t1)}`;
-          if (infoEl) infoEl.textContent = `${fmtInt(g.points.length)} points sélectionnés · ${fmtInt(total - g.points.length)} points conservés hors du log actif.`;
-        };
-        sel.onchange = refreshDayInfo;
-        refreshDayInfo();
-        const closeBtn = modal.querySelector(".close");
-        if (closeBtn) {
-          closeBtn.onclick = () => {
-            modal.style.display = "none";
-            if (!confirmed && typeof onCancel === "function") onCancel();
-          };
-        }
-        const btnCancel = document.getElementById("btnDtDayCancel");
-        if (btnCancel) {
-          btnCancel.onclick = () => {
-            modal.style.display = "none";
-            if (!confirmed && typeof onCancel === "function") onCancel();
-          };
-        }
-        const btnLoad = document.getElementById("btnDtDayLoad");
-        if (btnLoad) {
-          btnLoad.onclick = () => {
-            const idx = Number(sel.value);
-            confirmed = true;
-            modal.style.display = "none";
-            onConfirm(items[Number.isFinite(idx) ? idx : items.length - 1]);
-          };
-        }
-        // Centered by default + draggable header (same pattern as export popup).
-        const content = modal.querySelector(".modal-content");
-        const header = modal.querySelector(".glass-modal-header, .modal-header");
-        if (content) {
-          content.style.left = "";
-          content.style.top = "";
-          content.style.transform = "";
-          content.style.margin = "";
-          content.style.transition = "";
-        }
-        if (modal.dataset.dragInit !== "true" && header && content && typeof window.makeElementDraggable === "function") {
-          header.addEventListener("mousedown", () => {
-            if (content.dataset.sessionDragged === "true") return;
-            try {
-              const rect = content.getBoundingClientRect();
-              content.style.left = rect.left + "px";
-              content.style.top = rect.top + "px";
-              content.style.transform = "none";
-              content.style.margin = "0";
-              content.style.transition = "none";
-              content.dataset.sessionDragged = "true";
-            } catch (e) {}
-          }, true);
-          try {
-            header.style.cursor = "grab";
-            window.makeElementDraggable(header, content);
-          } catch (e) {}
-          modal.dataset.dragInit = "true";
-        }
-        modal.style.display = "block";
-      }
       // Handle new parser return format (object vs array)
       const parsedData = Array.isArray(result) ? result : result.points;
       const technology = Array.isArray(result) ? "Unknown" : result.tech;
@@ -62622,41 +62405,6 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
           technology,
       );
 
-      // One file can hold several drive days — group by calendar day and let
-      // the user pick ONE day to load. Other days stay available in-session
-      // via the log's "Journées" switcher; nothing is plotted before confirm.
-      const dtDays = groupDtDays(parsedData);
-      if (dtDays.length > 1) {
-        const baseName = fileName.replace(/\.[^/.]+$/, "");
-        const loadDay = (day) => {
-          if (!day || !day.points || !day.points.length) {
-            if (fileStatus) fileStatus.textContent = "Import annulé — aucune mesure chargée";
-            return;
-          }
-          const log = ingestSessionLog(day.points, `${baseName} · ${day.label}`, {
-            uid: "d" + day.key,
-            signaling: signalingData,
-            events: eventsData,
-            callSessions: callSessionsData,
-            umts: umtsCallAnalysis,
-            voice: voiceAnalysis,
-            visible: true,
-            silentStatus: false,
-          });
-          if (log) {
-            log.dtBaseName = baseName;
-            log.dtActiveDay = day.key;
-            // Other days are conserved (same array refs) outside the active log.
-            log.dtDayGroups = dtDays;
-            if (typeof window.updateLogsList === "function") { try { window.updateLogsList(); } catch (e) {} }
-          }
-        };
-        if (fileStatus) fileStatus.textContent = `${dtDays.length} journées détectées — confirmez la journée à charger`;
-        openDtDayPicker(fileName, dtDays,
-          (day) => loadDay(day),
-          () => { if (fileStatus) fileStatus.textContent = "Import annulé — aucune mesure chargée"; });
-        return;
-      }
       ingestSessionLog(parsedData, fileName.replace(/\.[^/.]+$/, ""), {
         uid: "",
         signaling: signalingData,
@@ -63135,6 +62883,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     "sitename",
                     "gnb name",
                     "gnbname",
+                    "gnodeb name",
+                    "gnodebname",
+                    "gnodeb function name",
+                    "gnodebfunctionname",
                     "base station name",
                   ]);
                   cellName = getVal(row, [
@@ -84200,28 +83952,6 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         try { window.__copLiteCleanupActions(actions); } catch (e) {}
       }
       body.appendChild(stats);
-      // DT multi-day import: other days stay available in-session ("Journées").
-      if (Array.isArray(log.dtDayGroups) && log.dtDayGroups.length > 1) {
-        const dayWrap = document.createElement("div");
-        dayWrap.style.cssText = "padding:6px 10px; border-bottom:1px solid #2a2d33; display:flex; align-items:center; gap:6px;";
-        const dayLabel = document.createElement("span");
-        dayLabel.textContent = "Journées";
-        dayLabel.style.cssText = "font-size:11px; color:#9ba3b8; font-weight:600; white-space:nowrap;";
-        const daySel = document.createElement("select");
-        daySel.title = "Changer de journée du DT";
-        daySel.style.cssText = "flex:1; min-width:0; background:#0f172a; color:#e2e8f0; border:1px solid #475569; border-radius:6px; padding:5px 6px; font-size:11px;";
-        log.dtDayGroups.forEach((g) => {
-          const opt = document.createElement("option");
-          opt.value = g.key;
-          opt.textContent = `${g.label} — ${Number((g.points || []).length).toLocaleString("fr-FR")} pts`;
-          if (g.key === log.dtActiveDay) opt.selected = true;
-          daySel.appendChild(opt);
-        });
-        daySel.onchange = () => { if (typeof window.switchDtActiveDay === "function") window.switchDtActiveDay(log.id, daySel.value); };
-        dayWrap.appendChild(dayLabel);
-        dayWrap.appendChild(daySel);
-        body.appendChild(dayWrap);
-      }
       body.appendChild(actions);
       item.appendChild(header);
       item.appendChild(body);
@@ -84233,74 +83963,6 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     if (searchInput && searchInput.value) {
       window.filterLogsList(searchInput.value);
     }
-  };
-
-  // DT multi-day: swap the log's active day in-session. Map, statistics,
-  // detection, AI and exports follow the active day.
-  window.switchDtActiveDay = function (logId, dayKey) {
-    const log = (window.loadedLogs || []).find((l) => String(l.id) === String(logId));
-    if (!log || !Array.isArray(log.dtDayGroups) || log.dtDayGroups.length < 2) return;
-    const target = log.dtDayGroups.find((g) => g.key === dayKey);
-    if (!target || dayKey === log.dtActiveDay) return;
-    const cur = log.dtDayGroups.find((g) => g.key === log.dtActiveDay);
-    if (cur) cur.points = log.points;
-    log.points = target.points;
-    log.dtActiveDay = target.key;
-    if (log.dtBaseName) log.name = `${log.dtBaseName} · ${target.label}`;
-    delete log._origPoints;
-    delete log._filteredPoints;
-    log.radioDegradationAnalysis = null; // backfilled for the new day by updateLogsList
-    const valOk = (v) => v !== undefined && v !== null && v !== "" && String(v).toUpperCase() !== "N/A";
-    const covOK = (m) => {
-      try {
-        const r = window.mapRenderer;
-        if (!r || typeof r.getMetricValue !== "function") return false;
-        const pts = log.points || [];
-        const n = Math.min(pts.length, 300);
-        for (let i = 0; i < n; i++) { if (valOk(r.getMetricValue(pts[i], m))) return true; }
-      } catch (e) {}
-      return false;
-    };
-    // Rebuild this log's metric layers on the new day's points.
-    const metrics = [];
-    if (window.metricLegendEntries) {
-      Object.entries(window.metricLegendEntries).forEach(([key, entry]) => {
-        if (entry && String(entry.logId) === String(log.id)) {
-          metrics.push({ key, metric: entry.metric, visible: entry.visible !== false });
-        }
-      });
-      metrics.forEach(({ key }) => { try { window.removeMetricLegendLayer(key); } catch (e) {} });
-    }
-    if (!covOK(log.currentParam)) {
-      const cands = metrics.map((m) => m.metric).concat(Array.isArray(log.customMetrics) ? log.customMetrics : []);
-      const hit = cands.find((m) => covOK(m));
-      if (hit) log.currentParam = hit;
-    }
-    metrics.forEach(({ metric, visible }) => {
-      try {
-        window.addMetricLegendLayer(log, metric);
-        if (!visible) {
-          const k = log.id + "::" + metric;
-          if (window.metricLegendEntries && window.metricLegendEntries[k]) window.toggleMetricLegendLayer(k);
-        }
-      } catch (e) {}
-    });
-    if (!window.COP_LITE && window.mapRenderer && log.visible !== false) {
-      try {
-        const ll = (log.points || [])
-          .filter((pt) => Number.isFinite(Number(pt && pt.lat)) && Number.isFinite(Number(pt && pt.lng)))
-          .map((pt) => [Number(pt.lat), Number(pt.lng)]);
-        if (ll.length && window.map) window.map.fitBounds(L.latLngBounds(ll));
-        window.mapRenderer.addLogLayer(log.id, log.points, log.currentParam || "level", false);
-      } catch (e) {}
-    }
-    if (typeof fileStatus !== "undefined" && fileStatus) {
-      try { fileStatus.textContent = `Journée ${target.label} — ${log.points.length.toLocaleString("fr-FR")} pts`; } catch (e) {}
-    }
-    if (typeof window.updateLogsList === "function") { try { window.updateLogsList(); } catch (e) {} }
-    if (typeof window.updateLegend === "function") { try { window.updateLegend(); } catch (e) {} }
-    if (typeof window.updateDTLayersSidebar === "function") { try { window.updateDTLayersSidebar(); } catch (e) {} }
-    if (typeof window.refreshDtKmlLayerList === "function") { try { window.refreshDtKmlLayerList(); } catch (e) {} }
   };
 
   let throughputPanelChart = null;
