@@ -8355,3 +8355,200 @@ body,
     .benchmark-dashboard-scope { margin-right: 0; }
     .benchmark-dashboard-canvas { height: 245px; padding: 7px; }
 }
+
+/* ==========================================================
+   Mobile / phone compatibility — floating window manager
+   Tables : full-area sheets switched by a bottom tab bar
+   ========================================================== */
+:root {
+    --cop-ws-top: 60px;
+    --cop-tabbar-h: 52px;
+}
+
+.window-header {
+    touch-action: none;
+}
+
+.window-resize-handle {
+    touch-action: none;
+}
+
+/* Phone layout (body.cop-mobile set by window_manager.js, ≤820px) */
+body.cop-mobile .floating-window.cop-mobile-area {
+    position: fixed !important;
+    left: 0 !important;
+    top: var(--cop-ws-top, 60px) !important;
+    width: 100% !important;
+    height: calc(100vh - var(--cop-ws-top, 60px) - var(--cop-tabbar-h, 52px)) !important;
+    height: calc(100dvh - var(--cop-ws-top, 60px) - var(--cop-tabbar-h, 52px)) !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    box-shadow: none;
+    transition: none;
+}
+
+body.cop-mobile .floating-window.cop-mobile-area:not(.cop-mobile-active) {
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+
+body.cop-mobile .floating-window .window-header {
+    height: 42px;
+    padding: 6px 10px;
+}
+
+body.cop-mobile .win-btn {
+    width: 34px;
+    height: 34px;
+    font-size: 16px;
+}
+
+body.cop-mobile .floating-window .window-resize-handle {
+    display: none !important;
+}
+
+/* Bottom tab bar (Logs / Map / Layers) */
+.mobile-tabbar {
+    display: none;
+}
+
+body.cop-mobile .mobile-tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(var(--cop-tabbar-h, 52px) + env(safe-area-inset-bottom, 0px));
+    padding: 0 6px env(safe-area-inset-bottom, 0px);
+    display: flex;
+    gap: 4px;
+    align-items: stretch;
+    background: rgba(7, 13, 22, 0.97);
+    border-top: 1px solid rgba(74, 144, 217, 0.35);
+    z-index: 2147483000;
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+}
+
+.mobile-tab-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: rgba(226, 232, 240, 0.55);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    padding: 8px 4px;
+    cursor: pointer;
+    border-top: 2px solid transparent;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mobile-tab-btn.mobile-tab-active {
+    color: #7cc4ff;
+    border-top-color: #2bb3a3;
+    background: rgba(43, 179, 163, 0.08);
+}
+
+/* Minimized-windows dock sits above the tab bar on phones */
+body.cop-mobile .window-dock {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: calc(var(--cop-tabbar-h, 52px) + env(safe-area-inset-bottom, 0px) + 8px);
+    top: auto;
+    max-width: none;
+    transform: none;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 6px 10px;
+    gap: 8px;
+}
+
+@media (max-width: 820px) {
+    html,
+    body {
+        overflow-x: hidden;
+    }
+
+    body.cop-mobile header,
+    body.cop-mobile #mainHeader {
+        flex-wrap: wrap;
+        height: auto;
+        min-height: 44px;
+        padding: 6px 8px;
+        gap: 8px;
+    }
+
+    body.cop-mobile .logo {
+        font-size: 15px;
+        margin-right: 10px;
+        padding-right: 10px;
+    }
+
+    body.cop-mobile .controls {
+        flex: 1 1 100%;
+        order: 5;
+        margin-left: 0;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    body.cop-mobile .header-map-actions {
+        flex: 1 1 auto;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+        min-width: 0;
+    }
+
+    body.cop-mobile .search-container {
+        flex: 1 1 auto;
+        width: 100%;
+        min-width: 0;
+    }
+
+    body.cop-mobile .search-input {
+        width: 100%;
+        min-width: 0;
+        flex: 1 1 auto;
+    }
+
+    body.cop-mobile .search-btn-icon {
+        min-width: 34px;
+        min-height: 34px;
+        font-size: 15px;
+    }
+
+    body.cop-mobile .header-select {
+        min-height: 34px;
+    }
+
+    body.cop-mobile .menu-trigger {
+        min-height: 36px;
+        padding: 6px 12px;
+        font-size: 13px;
+    }
+
+    body.cop-mobile .menu-panel {
+        max-width: calc(100vw - 16px);
+    }
+
+    body.cop-mobile .menu-submenu {
+        left: 0;
+        top: calc(100% + 2px);
+        max-width: calc(100vw - 32px);
+    }
+
+    body.cop-mobile .menu-item {
+        min-height: 38px;
+    }
+}

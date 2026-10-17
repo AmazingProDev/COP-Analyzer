@@ -8,13 +8,203 @@ class FloatingWindowManager {
     this.windows = [];
     this.highestZIndex = 1000;
     this.dockContainer = null;
+    this.mobileTabbar = null;
+    this.mobileActive = null;
     this.initDock();
+    this.initMobileMode();
   }
 
   initDock() {
     this.dockContainer = document.createElement("div");
     this.dockContainer.className = "window-dock";
     document.body.appendChild(this.dockContainer);
+  }
+
+  // ── Mobile mode ─────────────────────────────────────────────────────────
+  // Below 820px the floating windows become full-area sheets switched by a
+  // bottom tab bar instead of free-floating draggable frames.
+  initMobileMode() {
+    const mql = window.matchMedia("(max-width: 820px)");
+    this.mobileMql = mql;
+    const apply = () => this.applyMobileMode();
+    if (typeof mql.addEventListener === "function") {
+      mql.addEventListener("change", apply);
+    } else if (typeof mql.addListener === "function") {
+      mql.addListener(apply);
+    }
+    window.addEventListener("resize", () => {
+      if (this.isMobile()) this.updateWsTopVar();
+    });
+    window.addEventListener("orientationchange", () => {
+      setTimeout(() => {
+        if (this.isMobile()) this.updateWsTopVar();
+      }, 300);
+    });
+    this.applyMobileMode();
+  }
+
+  isMobile() {
+    return document.body.classList.contains("cop-mobile");
+  }
+
+  updateWsTopVar() {
+    const top =
+      typeof window.copWorkspaceTop === "function" ? window.copWorkspaceTop() : 60;
+    document.documentElement.style.setProperty("--cop-ws-top", top + "px");
+  }
+
+  ensureMobileTabbar() {
+    if (this.mobileTabbar && document.body.contains(this.mobileTabbar)) {
+      return this.mobileTabbar;
+    }
+    const bar = document.createElement("div");
+    bar.className = "mobile-tabbar";
+    bar.setAttribute("role", "tablist");
+    document.body.appendChild(bar);
+    this.mobileTabbar = bar;
+    return bar;
+  }
+
+  registerMobileWindow(win, title) {
+    if (win.__mobileTabBtn && document.body.contains(win.__mobileTabBtn)) return;
+    const bar = this.ensureMobileTabbar();
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mobile-tab-btn";
+    btn.textContent = title || "Fenêtre";
+    btn.setAttribute("role", "tab");
+    btn.addEventListener("click", () => this.activateMobileWindow(win));
+    bar.appendChild(btn);
+    win.__mobileTabBtn = btn;
+  }
+
+  // app.js opens windows by setting style.display directly (workspace
+  // restore, toggleBenchmarkPanel, …). On phone layout, route those open
+  // requests through the tab bar so the target becomes the active sheet
+  // instead of stacking over the currently visible one.
+  watchMobileDisplay(win) {
+    if (win.__mobileDisplayObserver) return;
+    win.__mobileDisplayObserver = new MutationObserver(() => {
+      if (!this.isMobile() || !win.classList.contains("cop-mobile-area")) return;
+      const disp = win.style.display;
+      if ((disp === "flex" || disp === "block") && !win.classList.contains("cop-mobile-active")) {
+        win.style.display = "";
+        this.activateMobileWindow(win);
+      }
+    });
+    win.__mobileDisplayObserver.observe(win, { attributes: true, attributeFilter: ["style"] });
+  }
+
+  enterMobileLayout(win) {
+    if (!win || win.classList.contains("cop-mobile-area")) return;
+    // Keep desktop geometry so leaving mobile mode can restore the layout.
+    win.dataset.mobPrevLeft = win.style.left || "";
+    win.dataset.mobPrevTop = win.style.top || "";
+    win.dataset.mobPrevWidth = win.style.width || "";
+    win.dataset.mobPrevHeight = win.style.height || "";
+    win.classList.add("cop-mobile-area");
+    const reg = this.windows.find((w) => w.element === win);
+    this.registerMobileWindow(win, reg ? reg.originalTitle : "Fenêtre");
+    this.watchMobileDisplay(win);
+  }
+
+  exitMobileLayoutAll() {
+    this.mobileActive = null;
+    for (const w of this.windows) {
+      const win = w.element;
+      if (!win.classList.contains("cop-mobile-area")) continue;
+      win.classList.remove("cop-mobile-area", "cop-mobile-active");
+      if (win.__mobileTabBtn) {
+        win.__mobileTabBtn.classList.remove("mobile-tab-active");
+      }
+      if (win.dataset.mobPrevWidth) {
+        win.style.left = win.dataset.mobPrevLeft || "50px";
+        win.style.top = win.dataset.mobPrevTop || "50px";
+        win.style.width = win.dataset.mobPrevWidth || "400px";
+        win.style.height = win.dataset.mobPrevHeight || "300px";
+      } else {
+        // Window was created while already in mobile mode: use sane desktop
+        // defaults matching the DOMContentLoaded layout.
+        const top = (typeof window.copWorkspaceTop === "function") ? window.copWorkspaceTop() : 60;
+        const defaults = {
+          "win-logs-sidebar": { left: 10, top: top + 10, width: 280, height: window.innerHeight - 120 },
+          "win-map": { left: 300, top: top + 10, width: Math.max(320, window.innerWidth - 650), height: window.innerHeight - 150 },
+          "win-smartcare-sidebar": { left: Math.max(10, window.innerWidth - 320), top: top + 10, width: 300, height: window.innerHeight - 120 },
+          "win-benchmarkPanel": { left: Math.max(8, Math.round((window.innerWidth - Math.min(1180, Math.round(window.innerWidth * 0.92))) / 2)), top: Math.max(top, Math.round((window.innerHeight - Math.min(840, Math.round(window.innerHeight * 0.9))) / 2)), width: Math.min(1180, Math.round(window.innerWidth * 0.92)), height: Math.min(840, Math.round(window.innerHeight * 0.9)) },
+        };
+        const def = defaults[win.id] || { left: 50, top: top + 10, width: 420, height: 320 };
+        win.style.left = def.left + "px";
+        win.style.top = def.top + "px";
+        win.style.width = def.width + "px";
+        win.style.height = def.height + "px";
+      }
+    }
+    if (this.mobileTabbar) {
+      this.mobileTabbar.remove();
+      this.mobileTabbar = null;
+    }
+    this.invalidateLeafletIfContained();
+  }
+
+  activateMobileWindow(win) {
+    if (!win) return;
+    this.mobileActive = win;
+    for (const w of this.windows) {
+      const active = w.element === win;
+      w.element.classList.toggle("cop-mobile-active", active);
+      if (w.element.__mobileTabBtn) {
+        w.element.__mobileTabBtn.classList.toggle("mobile-tab-active", active);
+      }
+      if (active && w.element.style.display === "none") {
+        w.element.style.display = "flex";
+      }
+    }
+    this.bringToFront(win);
+    this.updateWsTopVar();
+    this.invalidateLeafletIfContained(win);
+    window.dispatchEvent(new Event("resize"));
+  }
+
+  invalidateLeafletIfContained(win) {
+    setTimeout(() => {
+      const leafletMap =
+        window.mapRenderer && window.mapRenderer.map
+          ? window.mapRenderer.map
+          : window.map || null;
+      if (
+        leafletMap &&
+        typeof leafletMap.invalidateSize === "function" &&
+        (!win || (win.contains && win.contains(leafletMap.getContainer())))
+      ) {
+        leafletMap.invalidateSize();
+      }
+    }, 60);
+  }
+
+  applyMobileMode() {
+    const mobile = !!(this.mobileMql && this.mobileMql.matches);
+    if (mobile && !this.isMobile()) {
+      document.body.classList.add("cop-mobile");
+      this.ensureMobileTabbar();
+      this.updateWsTopVar();
+      // Header height settles after the CSS class application (wrap/labels).
+      setTimeout(() => this.updateWsTopVar(), 250);
+      for (const w of this.windows) this.enterMobileLayout(w.element);
+      const mapWin = this.windows.find((w) => w.element.id === "win-map");
+      if (!this.mobileActive && mapWin) {
+        this.activateMobileWindow(mapWin.element);
+      }
+    } else if (mobile && this.isMobile()) {
+      this.updateWsTopVar();
+      setTimeout(() => this.updateWsTopVar(), 250);
+      if (!this.mobileActive) {
+        const mapWin = this.windows.find((w) => w.element.id === "win-map");
+        if (mapWin) this.activateMobileWindow(mapWin.element);
+      }
+    } else if (!mobile && this.isMobile()) {
+      document.body.classList.remove("cop-mobile");
+      this.exitMobileLayoutAll();
+    }
   }
 
   bringToFront(winElement) {
@@ -113,6 +303,7 @@ class FloatingWindowManager {
           element.classList.contains("is-open")
         ) {
           if (win.style.display === "none") {
+            if (this.isMobile() && !win.classList.contains("cop-mobile-active")) return;
             win.style.display = "flex";
             this.bringToFront(win);
           }
@@ -122,6 +313,7 @@ class FloatingWindowManager {
             (elDisp === "flex" || elDisp === "block") &&
             win.style.display === "none"
           ) {
+            if (this.isMobile() && !win.classList.contains("cop-mobile-active")) return;
             win.style.display = "flex";
             this.bringToFront(win);
           }
@@ -151,6 +343,9 @@ class FloatingWindowManager {
 
     if (options.hidden) {
       win.style.display = "none";
+    } else if (this.isMobile()) {
+      // Windows created while the phone layout is active join the tab bar.
+      this.enterMobileLayout(win);
     }
 
     // Setup Resize Observer to invalidate maps or charts
@@ -174,9 +369,12 @@ class FloatingWindowManager {
     let isDragging = false;
     let startX, startY, initialLeft, initialTop;
 
-    header.addEventListener("mousedown", (e) => {
+    const onPointerDown = (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
       if (e.target.closest(".window-controls")) return;
       if (win.classList.contains("maximized")) return;
+      // Phone layout uses full-area sheets: dragging is disabled.
+      if (this.isMobile() && win.classList.contains("cop-mobile-area")) return;
 
       isDragging = true;
       startX = e.clientX;
@@ -184,12 +382,14 @@ class FloatingWindowManager {
       initialLeft = parseInt(win.style.left || 0, 10);
       initialTop = parseInt(win.style.top || 0, 10);
 
-      document.addEventListener("mousemove", onMouseMove);
-      document.addEventListener("mouseup", onMouseUp);
+      try { header.setPointerCapture(e.pointerId); } catch (_) {}
+      document.addEventListener("pointermove", onPointerMove);
+      document.addEventListener("pointerup", onPointerUp);
+      document.addEventListener("pointercancel", onPointerUp);
       e.preventDefault();
-    });
+    };
 
-    const onMouseMove = (e) => {
+    const onPointerMove = (e) => {
       if (!isDragging) return;
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
@@ -215,11 +415,14 @@ class FloatingWindowManager {
       win.style.top = newT + "px";
     };
 
-    const onMouseUp = () => {
+    const onPointerUp = () => {
       isDragging = false;
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerup", onPointerUp);
+      document.removeEventListener("pointercancel", onPointerUp);
     };
+
+    header.addEventListener("pointerdown", onPointerDown);
   }
 
   setupResizing(win) {
@@ -227,29 +430,32 @@ class FloatingWindowManager {
     let startX, startY, startW, startH, startL, startT;
     let currentDir = "";
 
-    const handles = win.querySelectorAll(".window-resize-handle");
-    handles.forEach((handle) => {
-      handle.addEventListener("mousedown", (e) => {
-        if (win.classList.contains("maximized")) return;
-        isResizing = true;
-        currentDir = handle.dataset.dir;
-        startX = e.clientX;
-        startY = e.clientY;
-        startW = parseInt(document.defaultView.getComputedStyle(win).width, 10);
-        startH = parseInt(
-          document.defaultView.getComputedStyle(win).height,
-          10,
-        );
-        startL = parseInt(win.style.left || 0, 10);
-        startT = parseInt(win.style.top || 0, 10);
+    const onPointerDown = (handle) => (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      if (win.classList.contains("maximized")) return;
+      // Phone layout: fixed full-area sheets, no resize.
+      if (this.isMobile() && win.classList.contains("cop-mobile-area")) return;
 
-        document.addEventListener("mousemove", onMouseMove);
-        document.addEventListener("mouseup", onMouseUp);
-        e.preventDefault();
-      });
-    });
+      isResizing = true;
+      currentDir = handle.dataset.dir;
+      startX = e.clientX;
+      startY = e.clientY;
+      startW = parseInt(document.defaultView.getComputedStyle(win).width, 10);
+      startH = parseInt(
+        document.defaultView.getComputedStyle(win).height,
+        10,
+      );
+      startL = parseInt(win.style.left || 0, 10);
+      startT = parseInt(win.style.top || 0, 10);
 
-    const onMouseMove = (e) => {
+      try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+      document.addEventListener("pointermove", onPointerMove);
+      document.addEventListener("pointerup", onPointerUp);
+      document.addEventListener("pointercancel", onPointerUp);
+      e.preventDefault();
+    };
+
+    const onPointerMove = (e) => {
       if (!isResizing) return;
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
@@ -306,11 +512,17 @@ class FloatingWindowManager {
       win.style.top = newT + "px";
     };
 
-    const onMouseUp = () => {
+    const onPointerUp = () => {
       isResizing = false;
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerup", onPointerUp);
+      document.removeEventListener("pointercancel", onPointerUp);
     };
+
+    const handles = win.querySelectorAll(".window-resize-handle");
+    handles.forEach((handle) => {
+      handle.addEventListener("pointerdown", onPointerDown(handle));
+    });
   }
 
   setupControls(win, element, title, minBtn, maxBtn, closeBtn) {
@@ -499,5 +711,12 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       }
     } catch (err) { console.warn("[WM] benchmark window failed:", err); }
+
+    // All windows exist now: (re)apply the phone layout and activate the map
+    // tab by default on small screens.
+    window.WM.applyMobileMode();
+    if (window.WM.isMobile()) {
+      setTimeout(() => window.WM.updateWsTopVar(), 400);
+    }
   }, 100); // Slight delay to ensure app.js initialized the elements if needed
 });
