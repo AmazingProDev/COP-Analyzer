@@ -3103,6 +3103,27 @@ const BenchmarkTxtParser = {
                 if (state.indexes.band === undefined && normalized === 'band') state.indexes.band = index;
                 if (state.indexes.voiceFactor === undefined && normalized === 'f-factor') state.indexes.voiceFactor = index;
                 if (state.indexes.voiceInterval === undefined && normalized === 'interval') state.indexes.voiceInterval = index;
+                // Timing Advance: the new Export Optim layout carries TA 5G
+                // then TA 4G under the same duplicated "TA" header.
+                if (normalized === 'ta') {
+                    if (state.indexes.ta5g === undefined) state.indexes.ta5g = index;
+                    else if (state.indexes.ta4g === undefined) state.indexes.ta4g = index;
+                }
+                // Voice-call record family (drops, setup failures,
+                // re-establishments): Export Optim layout.
+                if (state.indexes.callEventId === undefined && normalized === 'event id') state.indexes.callEventId = index;
+                if (normalized === 'event') {
+                    if (state.indexes.callEventMain === undefined) state.indexes.callEventMain = index;
+                    else if (state.indexes.callEventSecond === undefined && index !== state.indexes.callEventMain) state.indexes.callEventSecond = index;
+                }
+                if (state.indexes.disconnectStatus === undefined && normalized === 'disconnect status') state.indexes.disconnectStatus = index;
+                if (state.indexes.networkCause === undefined && normalized === 'network cause') state.indexes.networkCause = index;
+                if (state.indexes.callFailureStatus === undefined && normalized === 'call failure status') state.indexes.callFailureStatus = index;
+                if (state.indexes.csCallFailTime === undefined && normalized === 'cs call fail. time') state.indexes.csCallFailTime = index;
+                if (state.indexes.reestStatus === undefined && normalized === 're-est status') state.indexes.reestStatus = index;
+                if (state.indexes.reestDuration === undefined && normalized === 're-est duration') state.indexes.reestDuration = index;
+                if (state.indexes.callType === undefined && normalized === 'call type') state.indexes.callType = index;
+                if (state.indexes.callDirection === undefined && normalized === 'call direction') state.indexes.callDirection = index;
                 const isUsefulKpi = /(?:\bmos\b|throughput|\brate\b|bler|packet\s*loss|\bcqi\b|\bri\b|\bprb\b|retransmission|\brtt\b|latency|rsrp|rsrq|sinr|ss-rsrp|ss-rsrq|ss-sinr|pusch|pdsch)/i.test(name);
                 if (isUsefulKpi) {
                     const displayName = this._displayMetric(name, index);
@@ -3193,6 +3214,75 @@ const BenchmarkTxtParser = {
             if (hasVoiceCtx) {
                 const voicePci = this._number(values[state.indexes.voicePci]);
                 if (voicePci !== null) point.__voicePci = Math.trunc(voicePci);
+            }
+        }
+
+        // Timing Advance + voice-call events (Export Optim layout).  Placed
+        // before the neighbor-layout branch so both row paths capture them.
+        const readCell = (idx) => idx === undefined ? '' : String(values[idx] ?? '').trim();
+        if (state.indexes.ta5g !== undefined) {
+            const ta5 = this._number(values[state.indexes.ta5g]);
+            if (ta5 !== null) {
+                point['TA 5G'] = ta5;
+                point.properties['TA 5G'] = ta5;
+                state.metricNames.add('TA 5G');
+            }
+        }
+        if (state.indexes.ta4g !== undefined) {
+            const ta4 = this._number(values[state.indexes.ta4g]);
+            if (ta4 !== null) {
+                point['TA 4G'] = ta4;
+                point.properties['TA 4G'] = ta4;
+                state.metricNames.add('TA 4G');
+            }
+        }
+        {
+            const evId = readCell(state.indexes.callEventId);
+            const evMain = readCell(state.indexes.callEventMain);
+            const evSecond = readCell(state.indexes.callEventSecond);
+            const disc = readCell(state.indexes.disconnectStatus);
+            const netCause = readCell(state.indexes.networkCause);
+            const failStatus = readCell(state.indexes.callFailureStatus);
+            const failTime = readCell(state.indexes.csCallFailTime);
+            const reest = readCell(state.indexes.reestStatus);
+            const reestDur = readCell(state.indexes.reestDuration);
+            const callType = readCell(state.indexes.callType);
+            const callDir = readCell(state.indexes.callDirection);
+            const isDrop = disc !== '' || /drop/i.test(`${evMain} ${evSecond} ${failStatus}`);
+            const isFailure = failStatus !== '' || /call attempt failure|call.*\bfail/i.test(`${evMain} ${evSecond}`);
+            const isReest = !isDrop && !isFailure && (reest !== '' || /re-?establishment/i.test(`${evMain} ${evSecond}`));
+            if (evId || evMain || evSecond || disc || netCause || failStatus || reest || callType) {
+                const props = point.properties;
+                if (evId) props['Event ID'] = evId;
+                if (evMain) props['Event'] = evMain;
+                if (evSecond && evSecond !== evMain) props['event'] = evSecond;
+                if (disc) props['Disconnect status'] = disc;
+                if (netCause) props['Network cause'] = netCause;
+                if (failStatus) props['Call failure status'] = failStatus;
+                if (failTime) props['CS call fail. time'] = failTime;
+                if (reest) props['Re-est status'] = reest;
+                if (reestDur) props['Re-est duration'] = reestDur;
+                if (callType) props['Call type'] = callType;
+                if (callDir) props['Call direction'] = callDir;
+                if (isDrop || isFailure || isReest) {
+                    // One entry per (snapshot, kind): repeated rows for the
+                    // same timestamp must not duplicate the call event, while
+                    // distinct snapshots merged later each keep their own.
+                    const kind = isDrop ? 'drop' : (isFailure ? 'setupFailure' : 'reest');
+                    const arr = point.__voiceCallEvents || (point.__voiceCallEvents = []);
+                    if (!arr.some((entry) => entry && entry.kind === kind)) {
+                        arr.push({
+                            kind,
+                            eventId: evId || null,
+                            event: evMain || evSecond || null,
+                            disconnect: disc || null,
+                            networkCause: netCause || null,
+                            failureStatus: failStatus || null,
+                            reest: reest || null,
+                            callType: callType || null,
+                        });
+                    }
+                }
             }
         }
 
@@ -3651,6 +3741,30 @@ const BenchmarkTxtParser = {
                 representative.properties['Snapshot time range'] =
                     `${group[0].time} → ${representative.time}`;
             }
+            // Voice-call events survive the merge: same-second snapshots are
+            // collapsed into one representative, but each dropped/failed call
+            // keeps its own event (extra kinds preserved, same-kind repeats
+            // of one timestamp stay deduplicated).
+            {
+                const mergedVoice = [];
+                group.forEach((sample) => {
+                    (sample.__voiceCallEvents || []).forEach((entry) => {
+                        if (entry && !mergedVoice.some((kept) => kept.kind === entry.kind &&
+                            String(kept.event || '') === String(entry.event || '') &&
+                            String(kept.disconnect || '') === String(entry.disconnect || '') &&
+                            String(kept.failureStatus || '') === String(entry.failureStatus || ''))) {
+                            mergedVoice.push(entry);
+                        }
+                        for (const [key, value] of Object.entries((sample.properties || {}))) {
+                            const cur = representative.properties ? representative.properties[key] : undefined;
+                            if ((cur === undefined || cur === '' || cur === null) && value !== '' && value !== null && value !== undefined) {
+                                representative.properties[key] = value;
+                            }
+                        }
+                    });
+                });
+                if (mergedVoice.length) representative.__voiceCallEvents = mergedVoice;
+            }
             merged.push(representative);
             group = [];
             groupStartMs = NaN;
@@ -3783,6 +3897,102 @@ const BenchmarkTxtParser = {
             priorNrPrimary = current;
             nrWasExplicitlyReleased = false;
         });
+        // Voice-call events (Export Optim layout): drops, setup failures and
+        // re-establishments decoded from the Event / Disconnect status /
+        // Call failure status columns.  GPS-backed snapshots become map
+        // events + call sessions; the COP voice counters use all of them.
+        const voiceCallEvents = [];
+        const voiceCallSessions = [];
+        let voiceDropCount = 0;
+        let voiceFailureCount = 0;
+        points.forEach((point) => {
+            const voiceEvents = point && point.__voiceCallEvents;
+            if (!Array.isArray(voiceEvents) || !voiceEvents.length) return;
+            const hasGps = point && Number.isFinite(point.lat) && Number.isFinite(point.lng);
+            voiceEvents.forEach((ve, veIndex) => {
+            if (!ve) return;
+            const sid = `voicetxt_${ve.kind}_${point.id}${voiceEvents.length > 1 ? `_e${veIndex}` : ''}`;
+            const ctxProps = Object.assign({ Time: point.time }, point.properties || {});
+            if (ve.kind === 'drop') {
+                voiceDropCount += 1;
+                if (!hasGps) return;
+                voiceCallEvents.push({
+                    id: `call_drop_${point.id}`,
+                    event: 'Call Drop',
+                    eventKind: 'call_drop',
+                    time: point.time,
+                    lat: point.lat,
+                    lng: point.lng,
+                    sessionId: sid,
+                    callId: sid,
+                    endType: 'DROP',
+                    message: `Call Drop${ve.disconnect ? `: ${ve.disconnect}` : ''}${ve.networkCause && ve.networkCause.toLowerCase() !== 'undefined' ? ` (${ve.networkCause})` : ''}`,
+                    properties: Object.assign({}, ctxProps, {
+                        Event: 'Call Drop',
+                        'Session ID': sid,
+                        'End Type': 'DROP',
+                        Drop: 'Yes',
+                    }),
+                });
+                voiceCallSessions.push({
+                    id: sid,
+                    sessionId: sid,
+                    drop: true,
+                    endType: 'DROP',
+                    callType: ve.callType || 'Voice call',
+                    startTime: point.time,
+                    endTime: point.time,
+                    endCause: ve.disconnect || ve.networkCause || 'DROP',
+                    eventAnchor: { lat: point.lat, lng: point.lng, time: point.time, properties: Object.assign({}, point.properties || {}) },
+                });
+            } else if (ve.kind === 'setupFailure') {
+                voiceFailureCount += 1;
+                if (!hasGps) return;
+                const reason = ve.failureStatus || ve.event || 'Call failure';
+                voiceCallEvents.push({
+                    id: `call_setup_failure_${point.id}`,
+                    event: 'Call Failure',
+                    eventKind: 'call_setup_failure',
+                    time: point.time,
+                    lat: point.lat,
+                    lng: point.lng,
+                    sessionId: sid,
+                    callId: sid,
+                    endType: 'CALL_SETUP_FAILURE',
+                    message: `Call Failure: ${reason}`,
+                    properties: Object.assign({}, ctxProps, {
+                        Event: 'Call Failure',
+                        'Session ID': sid,
+                        'End Type': 'CALL_SETUP_FAILURE',
+                        'Setup Failure': 'Yes',
+                        'Failure Reason': reason,
+                    }),
+                });
+                voiceCallSessions.push({
+                    id: sid,
+                    sessionId: sid,
+                    setupFailure: true,
+                    endType: 'CALL_SETUP_FAILURE',
+                    callType: ve.callType || 'Voice call',
+                    startTime: point.time,
+                    endTime: point.time,
+                    failureReason: { label: reason, cause: ve.networkCause || reason },
+                    eventAnchor: { lat: point.lat, lng: point.lng, time: point.time, properties: Object.assign({}, point.properties || {}) },
+                });
+            } else if (ve.kind === 'reest' && hasGps) {
+                voiceCallEvents.push({
+                    id: `call_reest_${point.id}`,
+                    event: 'Call Re-establishment',
+                    eventKind: 'call_reestablishment',
+                    time: point.time,
+                    lat: point.lat,
+                    lng: point.lng,
+                    message: `Call Re-establishment${ve.reest ? `: ${ve.reest}` : ''}`,
+                    properties: Object.assign({}, ctxProps, { Event: 'Call Re-establishment' }),
+                });
+            }
+            });
+        });
         const hasMetric = name => points.some(point => {
             const value = point && point[name];
             return Number.isFinite(value) || (
@@ -3797,8 +4007,24 @@ const BenchmarkTxtParser = {
             tech: '4G/5G Benchmark TXT',
             customMetrics: metrics,
             signaling: [],
-            events: nrPscellChangeEvents,
-            callSessions: [],
+            events: nrPscellChangeEvents.concat(voiceCallEvents),
+            callSessions: voiceCallSessions,
+            voiceAnalysis: (voiceDropCount || voiceFailureCount) ? {
+                source: 'benchmark-txt-voice-events',
+                profile: { id: 'Benchmark TXT Voice' },
+                summary: {
+                    drops: voiceDropCount,
+                    failures: voiceFailureCount,
+                    totalCalls: voiceDropCount + voiceFailureCount,
+                    coverageDegradations: 0,
+                    qualityDegradations: 0,
+                    combinedDegradations: 0,
+                    sourceRows: Math.max(0, state.lineCount - 1),
+                    snapshots: points.length,
+                },
+                incidents: [],
+                macroZones: [],
+            } : null,
             debugInfo: {
                 schema: state.neighborLayout?.schema || 'nemo-benchmark-tab-v1',
                 sourceRows: Math.max(0, state.lineCount - 1),
@@ -3809,6 +4035,8 @@ const BenchmarkTxtParser = {
                 gpsRows: state.gpsRows,
                 validGpsRows: state.validGpsRows,
                 nrPscellChangeEvents: nrPscellChangeEvents.length,
+                voiceDropEvents: voiceDropCount,
+                voiceFailureEvents: voiceFailureCount,
                 reason: points.length ? null : 'No valid GPS coordinates (Lat./Lon.) were found in this Benchmark TXT export.'
             }
         };

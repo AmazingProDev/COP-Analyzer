@@ -85,6 +85,14 @@
       id: "mos", label: "MOS / Service Quality", frenchLabel: "Dégradation MOS",
       severity: incident?.mos?.classification === "critical" ? "Severe Service Condition" : "Dégradation QoE",
     };
+    if (incident?.type === "VOICE_DROP") return {
+      id: "voice_drop", label: "Voice Drop", frenchLabel: "Coupure VoLTE",
+      severity: "Severe Service Condition",
+    };
+    if (incident?.type === "VOICE_SETUP_FAILURE") return {
+      id: "voice_setup_failure", label: "Voice Setup Failure", frenchLabel: "Échec d’appel VoLTE",
+      severity: "Dégradation QoE",
+    };
     const profile = profileFor(analysis, incident) || {};
     const rsrp = incident?.metrics?.rsrp || {};
     const sinr = incident?.metrics?.sinr || {};
@@ -155,6 +163,8 @@
     if (/INTER_FREQUENCY_RADIO_ALTERNATIVE/.test(code)) return "Vérifier priorités inter-fréquences et configuration A5 avant de proposer un ajustement ; comparer la couverture cible sur un nouveau DT.";
     if (/MOBILITY|PING_PONG|TRANSITION/.test(code)) return "Reconstituer la chronologie RRC et les relations de voisinage ; ne modifier la mobilité qu'après confirmation du mécanisme.";
     if (incident?.type === "MOS_DEGRADATION") return "Corréler le MOS aux KPI packet loss, jitter, RTT et codec sur la même fenêtre ; qualifier la contribution RF avant action réseau.";
+    if (incident?.type === "VOICE_DROP") return "Reconstituer la chronologie RRC et la qualité radio (RSRP/SINR) autour de la coupure ; vérifier couverture, interférences et mobilité avant toute action.";
+    if (incident?.type === "VOICE_SETUP_FAILURE") return "Vérifier accessibilité cellulaire, congestion et qualité radio au point d'échec ; rejouer un appel de contrôle avant toute optimisation.";
     if (issue.id === "coverage" || issue.id === "coverage_quality") return "Contrôler disponibilité, couverture de couche, puissance et géométrie des secteurs ; choisir l'action RF après vérification terrain et simulation.";
     if (limitations.some((item) => /Voisinage .* non mesuré/.test(item))) return "Compléter les mesures de voisinage/scanner et rejouer le DT avant toute optimisation radio ciblée.";
     return "Vérifier les KPI et mesures complémentaires sur la fenêtre exacte, définir une correction documentée puis rejouer le DT après action.";
@@ -189,15 +199,17 @@
     if (incident?.type === "MOBILITY_ANOMALY") return `Aller-retour de cellule serveuse observé${windowFor(incident)} sur ${displayBand}${scope}.${samples} Mécanisme de mobilité à confirmer par RRC.`;
     if (incident?.type === "THROUGHPUT_DEGRADATION") return `Débit DL application dégradé${windowFor(incident)}${scope}.${samples} Débit P50 ${n(incident.throughput?.median, 2)} Mbit/s.`;
     if (incident?.type === "MOS_DEGRADATION") return `Dégradation MOS mesurée${windowFor(incident)}${scope}.${samples} MOS P50 ${n(incident.mos?.median, 2)} ; origine à qualifier.`;
+    const symptom = issue.id === "coverage" ? "Couverture RSRP dégradée" : issue.id === "quality" ? "Qualité SINR dégradée" : "Couverture RSRP et qualité SINR dégradées";
+    const rf = `${finite(incident?.metrics?.rsrp?.median) === null ? "" : ` RSRP P50 ${n(incident.metrics.rsrp.median)} dBm.`}` +
+      `${finite(incident?.metrics?.sinr?.median) === null ? "" : ` SINR P50 ${n(incident.metrics.sinr.median)} dB.`}`;
+    if (incident?.type === "VOICE_DROP") return `Coupure d'appel VoLTE${windowFor(incident)}${scope}.${samples} Serveuse ${cellFor(incident)}.${rf}`;
+    if (incident?.type === "VOICE_SETUP_FAILURE") return `Échec d'établissement d'appel VoLTE${windowFor(incident)}${scope}.${samples} Serveuse ${cellFor(incident)}.${rf}`;
     const techBand = `${incident?.rat === "NR" ? "5G" : "4G"} ${displayBand}`;
     const zone = `${techBand}, serveuse ${cellFor(incident)}${windowFor(incident)}${scope}.`;
     if (isNrLoss(incident)) return `Perte locale de PSCell sur ${techBand}${windowFor(incident)}${scope}.${samples} ` +
       `PSCell avant : ${text(incident.previousNrServing?.cellName, "non résolue")} ; ` +
       `PSCell après : ${text(incident.nextNrServing?.cellName, "non résolue")}. ` +
       `Intervalle LTE seule mesuré.`;
-    const symptom = issue.id === "coverage" ? "Couverture RSRP dégradée" : issue.id === "quality" ? "Qualité SINR dégradée" : "Couverture RSRP et qualité SINR dégradées";
-    const rf = `${finite(incident?.metrics?.rsrp?.median) === null ? "" : ` RSRP P50 ${n(incident.metrics.rsrp.median)} dBm.`}` +
-      `${finite(incident?.metrics?.sinr?.median) === null ? "" : ` SINR P50 ${n(incident.metrics.sinr.median)} dB.`}`;
     return `${symptom} sur ${zone}${samples}${rf}`;
   };
 

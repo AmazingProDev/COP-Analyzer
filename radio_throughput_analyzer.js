@@ -30,7 +30,7 @@
       return { ...items[items.length - 1], mbps: distribution.median,
         throughputStats: distribution, sourceIndices: items.map((item) => item.sourceIndex) };
     });
-    const bad = (item) => item.mbps < (profile.degradedMbps ?? 2);
+    const bad = (item) => item.mbps < (profile.degradedMbps ?? 5);
     const critical = (item) => item.mbps < (profile.criticalMbps ?? .5);
     const incidents = [];
     let active = null, pending = [], recovered = 0, previous = null;
@@ -39,7 +39,7 @@
       while (active.length && !bad(active[active.length - 1])) active.pop();
       const degraded = active.filter(bad);
       const fast = active.some((item, index) => index > 0 && critical(item) && critical(active[index - 1]));
-      if (degraded.length < (profile.minSamples ?? 3) && !fast) { active = null; return; }
+      if (degraded.length < (profile.minSamples ?? 5) && !fast) { active = null; return; }
       const first = active[0], last = active[active.length - 1];
       const rate = mosModule.stats(active.map((item) => item.mbps));
       incidents.push({ id: `throughput_${incidents.length + 1}`, type: "THROUGHPUT_DEGRADATION",
@@ -66,7 +66,7 @@
       pending.push(item);
       if (pending.length > (profile.windowSamples ?? 5)) pending.shift();
       if (!active) {
-        if (pending.filter(bad).length >= (profile.minSamples ?? 3) ||
+        if (pending.filter(bad).length >= (profile.minSamples ?? 5) ||
           pending.length >= 2 && critical(pending[pending.length - 1]) && critical(pending[pending.length - 2])) {
           active = pending.slice(Math.max(0, pending.findIndex(bad)));
           pending = []; recovered = 0;

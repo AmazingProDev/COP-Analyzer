@@ -58,6 +58,18 @@ window.themeConfig = {
             { min: 50, max: 70, maxInclusive: true, color: '#eab308', label: 'Moderate (50–70%)' },
             { min: 70, minExclusive: true, color: '#ef4444', label: 'Bad (> 70%)' }
         ],
+        // Timing Advance (distance proxy). 5G NR and LTE use different
+        // scales, hence one band set per RAT.
+        ta_5g: [
+            { min: 4000, color: '#ef4444', label: 'Lointain (> 4000)' },
+            { min: 1500, max: 4000, color: '#eab308', label: 'Moyen (1500 à 4000)' },
+            { max: 1500, color: '#22c55e', label: 'Proche (< 1500)' }
+        ],
+        ta_4g: [
+            { min: 80, color: '#ef4444', label: 'Lointain (> 80)' },
+            { min: 20, max: 80, color: '#eab308', label: 'Moyen (20 à 80)' },
+            { max: 20, color: '#22c55e', label: 'Proche (< 20)' }
+        ],
         // Legacy 'level' and 'quality' (mapping to rsrp/rsrq)
         // 'level' suit le même défaut RSRP: Bon > -105 / Moyen -115 à -105 / Mauvaise < -115
         level: [
@@ -107,6 +119,9 @@ window.getThresholdKey = (metric) => {
     if (m.includes('mcs')) return 'mcs';
     // Throughput
     if (m.includes('throughput') || m.includes('thr')) return 'throughput';
+    // Timing Advance (TA 5G / TA 4G metrics)
+    if (mNorm === 'ta5g' || mNorm === 'tanr' || m.includes('ta 5g') || m.includes('ta nr')) return 'ta_5g';
+    if (mNorm === 'ta4g' || mNorm === 'talte' || mNorm === 'ta' || m.includes('ta 4g') || m.includes('ta lte') || m.includes('timing advance')) return 'ta_4g';
 
     // Discrete/Categorical Metrics
     const discrete = [

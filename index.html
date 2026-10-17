@@ -1430,21 +1430,21 @@
     </aside>
 
     <script defer src="site_match_utils.js?v=1"></script>
-    <script defer src="map_renderer.js?v=135"></script>
+    <script defer src="map_renderer.js?v=139"></script>
     <script defer src="cesium_map_adapter.js?v=5"></script>
     <script defer src="analyze_stats.js?v=2"></script>
     <script defer src="metric_registry.js?v=7"></script>
     <script defer src="voice_incident_analyzer.js?v=27"></script>
     <script defer src="radio_profiles.js?v=4"></script>
     <script defer src="radio_mos_analyzer.js?v=4"></script>
-    <script defer src="radio_throughput_analyzer.js?v=2"></script>
+    <script defer src="radio_throughput_analyzer.js?v=3"></script>
     <script defer src="radio_scoring.js?v=3"></script>
     <script defer src="radio_rca_engine.js?v=8"></script>
     <script defer src="radio_neighbor_mobility_rca.js?v=2"></script>
     <script defer src="radio_scan_fusion.js?v=1"></script>
     <script defer src="radio_degradation_analyzer.js?v=25"></script>
-    <script defer src="radio_professional_report.js?v=10"></script>
-    <script defer src="parser.js?v=121"></script>
+    <script defer src="radio_professional_report.js?v=11"></script>
+    <script defer src="parser.js?v=123"></script>
     <script defer src="lte_ho_analysis.js?v=6"></script>
     <script defer src="route_scan_analyzer.js?v=9"></script>
     <script defer src="bdd_matcher.js?v=1"></script>
@@ -1528,6 +1528,7 @@
       if (s.indexOf("ssrsrq") !== -1 || s.indexOf("rsrq") !== -1) return true;
       if (s === "level" || s.indexOf("signallevel") !== -1) return true;
       if (s === "quality") return true;
+      if (s === "ta" || s === "ta5g" || s === "ta4g" || s.indexOf("timingadvance") !== -1) return true;
       return false;
     };
     // Remove empty sidebar group headers left behind by the allowlist filter.
@@ -1568,11 +1569,11 @@
     <script defer src="benchmark_nemo_scorecard_state.js?v=2"></script>
     <script defer src="benchmark_nemo_macro_state.js?v=10"></script>
     <script defer src="benchmark_nemo_ui_state.js?v=1"></script>
-    <script defer src="theme_v2.js?v=v598"></script>
+    <script defer src="theme_v2.js?v=v599"></script>
     <script defer src="window_manager.js?v=4"></script>
-    <script defer src="app.js?v=v917"></script>
+    <script defer src="app.js?v=v922"></script>
     <script defer src="radio_dt_cop_export.js?v=20"></script>
-    <script defer src="radio_degradation_ui.js?v=45"></script>
+    <script defer src="radio_degradation_ui.js?v=52"></script>
     <!-- User Point Modal -->
     <div id="userPointModal" class="modal">
         <div class="modal-content user-point-modal-content">

@@ -20884,6 +20884,109 @@ document.addEventListener("DOMContentLoaded", () => {
     mapContainer.style.boxShadow = "none";
   });
 
+  // Voice drops / setup failures live inside the radio review ("Radio
+  // candidates to review") instead of a separate voice entry. Merged
+  // incidents reuse the anchor log point (real RF context + map focus) and
+  // stable ids so review states survive re-analysis.
+  window.mergeVoiceIntoRadioAnalysis = function (log) {
+    const analysis = log && log.radioDegradationAnalysis;
+    if (!analysis || !Array.isArray(analysis.incidents)) return 0;
+    const prevStates = new Map();
+    analysis.incidents = analysis.incidents.filter((inc) => {
+      if (inc && inc.voiceMerged) {
+        if (inc.reviewState && inc.reviewState !== "candidate") prevStates.set(inc.id, inc.reviewState);
+        return false;
+      }
+      return true;
+    });
+    const sessions = (log.callSessions || []).filter((s) => s &&
+      (s.drop === true || s.setupFailure === true ||
+        /^(DROP|CALL_SETUP_FAILURE)$/.test(String(s.endType || "").toUpperCase())));
+    const num = (v) => {
+      if (v === undefined || v === null || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const anchorOf = (s) => {
+      const a = (s && s.eventAnchor) || {};
+      const alat = num(a.lat), alng = num(a.lng);
+      const pts = Array.isArray(log.points) ? log.points : [];
+      let best = null, bestScore = Infinity;
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i];
+        if (!p) continue;
+        const plat = num(p.lat), plng = num(p.lng);
+        if (!Number.isFinite(plat) || !Number.isFinite(plng)) continue;
+        let score = Infinity;
+        if (Number.isFinite(alat) && Number.isFinite(alng)) {
+          const dLat = (plat - alat) * 111320;
+          const dLng = (plng - alng) * 111320 * Math.cos(plat * Math.PI / 180);
+          const dist = Math.hypot(dLat, dLng);
+          const timeOk = !a.time || !p.time || String(a.time) === String(p.time);
+          score = dist + (timeOk ? 0 : 500);
+        } else if (a.time && p.time && String(a.time) === String(p.time)) {
+          score = 0;
+        } else continue;
+        if (score < bestScore) { bestScore = score; best = { point: p, index: i }; }
+      }
+      return best && bestScore <= 500 ? best : null;
+    };
+    const ratOf = (p) => {
+      const r = String(p?.parsed?.serving?.rat || p?.parsed?.serving?.technology ||
+        p?.["Serving Technology"] || "").toUpperCase();
+      if (r.includes("NR") || /(^|[^A-Z])5G([^A-Z]|$)/.test(r)) return "NR";
+      if (r.includes("LTE") || r.includes("E-UTRA") || r.includes("4G")) return "LTE";
+      return "LTE"; // voice-call records (VoLTE/CSFB context)
+    };
+    let added = 0;
+    sessions.forEach((s) => {
+      const isDrop = s.drop === true || String(s.endType || "").toUpperCase() === "DROP";
+      const found = anchorOf(s);
+      if (!found) return;
+      const anchor = found.point;
+      const rat = ratOf(anchor);
+      const type = isDrop ? "VOICE_DROP" : "VOICE_SETUP_FAILURE";
+      const id = `voice_${isDrop ? "drop" : "setup_failure"}_${String(s.sessionId || s.id || added)}`;
+      const rsrp = num(anchor["Serving RSRP"] ?? anchor.rsrp ?? anchor.level);
+      const sinr = num(anchor["Serving SINR"] ?? anchor.sinr);
+      const statOf = (v) => v === null ? null : { median: v, p10: v, min: v, max: v, count: 1 };
+      const serving = (anchor.parsed && anchor.parsed.serving) || {};
+      const snap = { ...anchor, sourceIndex: found.index };
+      const incident = {
+        id, voiceMerged: true, category: "voice", rat, type,
+        severity: isDrop ? "critical" : "major",
+        startTime: anchor.time, endTime: anchor.time,
+        start: { lat: anchor.lat, lng: anchor.lng },
+        end: { lat: anchor.lat, lng: anchor.lng },
+        representative: snap,
+        dominantServing: null,
+        servingCells: [], servingChanges: 0,
+        mobility: null, stationary: false,
+        sampleCount: 1, canonicalSampleCount: 1, requiredSampleCount: 1,
+        durationSec: 0, distanceM: 0,
+        band: serving.band ?? anchor["Serving Band"] ?? "",
+        channel: Number.isFinite(Number(serving.channel ?? serving.nrarfcn ?? serving.earfcn))
+          ? Number(serving.channel ?? serving.nrarfcn ?? serving.earfcn) : null,
+        metrics: { rsrp: statOf(rsrp), sinr: statOf(sinr) },
+        coverageSampleCount: 0, sinrSampleCount: 0,
+        criticalSnapshotPct: isDrop ? 100 : 0,
+        degradedDensityPct: 100,
+        serviceImpact: { score: isDrop ? 95 : 85 },
+        reviewState: prevStates.get(id) || "candidate",
+        sequence: [snap],
+        sourceRows: [],
+        evidence: [String(s.endCause || s.failureReason?.label || s.message || (isDrop ? "Dropped call" : "Call setup failure"))],
+        primaryRca: null,
+      };
+      analysis.incidents.push(incident);
+      added++;
+    });
+    analysis.summary = analysis.summary || {};
+    analysis.summary.voiceCandidates = added;
+    analysis.voiceMergeDone = true;
+    return added;
+  };
+
   // Modal Action: Current View
   const btnExportCurrentView = document.getElementById("btnExportCurrentView");
   if (btnExportCurrentView) {
@@ -32705,11 +32808,37 @@ document.addEventListener("DOMContentLoaded", () => {
         if (pool.length) {
           const ratPool = pool.filter(ratCompatible);
           if (!ratPool.length) return NO_MATCH;
+          const plat0 = toNum(p?.lat);
+          const plng0 = toNum(p?.lng);
+          // Same unified 8 km NR radius as MapRenderer.getServingCell
+          // (PCI + ΔARFCN ≤ 5000 gates guard against reuse).
+          const nrProximityRadiusM = () => 8000;
+          const nrProximityOk = (site) => {
+            const slat = toNum(site?.lat);
+            const slng = toNum(site?.lng ?? site?.lon);
+            if (plat0 === null || plng0 === null || slat === null || slng === null) return false;
+            const helper = window.siteMatchUtils;
+            if (helper && typeof helper.haversineMeters === "function") {
+              const distance = helper.haversineMeters(plat0, plng0, slat, slng);
+              return Number.isFinite(distance) && distance <= nrProximityRadiusM(site);
+            }
+            const latScale = 111320;
+            const lngScale = latScale * Math.cos(((plat0 + slat) / 2) * Math.PI / 180);
+            return Math.hypot((plat0 - slat) * latScale, (plng0 - slng) * lngScale) <= nrProximityRadiusM(site);
+          };
           const freqMatched =
             freq !== null
               ? ratPool.filter((x) => {
                   const sf = toNum(x?.currentFreq ?? x?.freq);
-                  return sf === null ? false : Math.abs(sf - freq) < 1;
+                  if (sf === null) return false;
+                  if (Math.abs(sf - freq) < 1) return true;
+                  // Same relaxed NR rule as MapRenderer.getServingCell: a 5G
+                  // PCI also matches within ±5000 NR-ARFCN (SSB/BWP vs
+                  // central DL) when the sector is geographically plausible.
+                  // Never fall back to an arbitrary same-PCI sector when the
+                  // NR frequency does not match.
+                  if (!requiresNr || Math.abs(sf - freq) > 5000) return false;
+                  return nrProximityOk(x);
                 })
               : [];
           // A 5G PCI requires its NR-ARFCN as well. Never fall back to an
@@ -49175,6 +49304,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     let effectiveServingResolved = isLTE
       ? lteServingResolved || servingRes
       : servingRes;
+    // Diagnostic text when an NR serving cell cannot be BDD-resolved
+    // (rendered under the Point Details header).
+    let nrServingGapText = "";
     // In EN-DC, NR PSCell is the primary serving cell.  Do not let a generic
     // field from another RAT replace it in the Point Details header.  The LTE
     // PCell remains visible immediately below as the anchor.
@@ -49198,6 +49330,31 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         effectiveServingIdentity = Number.isFinite(nrPrimaryChannel)
           ? `${nrPrimaryPci}/${nrPrimaryChannel}`
           : String(nrPrimaryPci);
+        // Self-diagnostic: explain WHY no BDD name matched (missing PCI in
+        // BDD, carrier too far off, or nearest candidate beyond tolerance).
+        try {
+          if (window.mapRenderer && typeof window.mapRenderer.describeNrServingGap === "function") {
+            const gap = window.mapRenderer.describeNrServingGap(
+              nrPrimaryPci,
+              Number.isFinite(nrPrimaryChannel) ? nrPrimaryChannel : null,
+              p.lat, p.lng);
+            if (gap) {
+              if (!gap.samePci) {
+                nrServingGapText = `BDD : aucun secteur PCI ${nrPrimaryPci} (${gap.sectors5g} secteurs 5G indexés) — vérifiez le fichier BDD chargé`;
+              } else if (!gap.freqOk) {
+                nrServingGapText = gap.minDelta === null
+                  ? `BDD : ${gap.samePci} secteur(s) PCI ${nrPrimaryPci} sans NR-ARFCN (BDD obsolète/cassée) — réimportez le fichier BDD`
+                  : `BDD : ${gap.samePci} secteur(s) PCI ${nrPrimaryPci} mais Δf min ${gap.minDelta} (> 5000) — porteuse BDD différente`;
+              } else if (gap.nearestM !== null && gap.nearestM > 8000) {
+                const km = `${(gap.nearestM / 1000).toFixed(1)} km`;
+                nrServingGapText = `BDD : ${gap.freqOk} candidat(s) PCI ${nrPrimaryPci}, plus proche à ${km} (hors tolérance) — BDD à mettre à jour ?`;
+              } else if (gap.nearestM !== null) {
+                const dist = gap.nearestM >= 1000 ? `${(gap.nearestM / 1000).toFixed(1)} km` : `${Math.round(gap.nearestM)} m`;
+                nrServingGapText = `BDD : candidat PCI ${nrPrimaryPci} à ${dist} non retenu — rechargez l'app (Ctrl+F5), code obsolète ?`;
+              }
+            }
+          }
+        } catch (_) { nrServingGapText = ""; }
       }
     } else {
       // COP: LTE-only mrdc points — the header must use the same BDD-resolved
@@ -56177,6 +56334,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       "  Lng: " +
       lngText +
       "</div>" +
+      (nrServingGapText
+        ? '<div style="color:#fbbf24; font-size:11px; margin-top:2px;">' +
+          escapeHtml(nrServingGapText) + "</div>"
+        : "") +
       servingSiteDebugHtml +
       mobileStateBadgeHtml +
       rrcStateBadgeHtml +
@@ -62460,6 +62621,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
           try {
             newLog.radioDegradationAnalysis =
               window.RadioDegradationAnalyzer.analyze(sessPoints);
+            // Voice drops / setup failures join the radio review instead of
+            // a separate voice entry.
+            if (typeof window.mergeVoiceIntoRadioAnalysis === "function") {
+              try { window.mergeVoiceIntoRadioAnalysis(newLog); } catch (mergeErr) {
+                console.warn("[LTE/NR radio analysis] voice merge skipped:", mergeErr);
+              }
+            }
             const summary = newLog.radioDegradationAnalysis?.summary || {};
             console.info(
               "[LTE/NR radio analysis]",
@@ -62772,7 +62940,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       }
 
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
         try {
           const data = new Uint8Array(event.target.result);
           const workbook = XLSX.read(data, { type: "array" });
@@ -62783,171 +62951,30 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             return /(^|\b)(2G|3G|4G|5G)(\b|$)/i.test(txt);
           });
           if (bddRatSheets.length > 0) {
-            const normCol = (str) =>
-              String(str)
-                .toLowerCase()
-                .replace(/[^a-z0-9]/g, "");
-            const getVal = (row, possibleNames) => {
-              const rowKeys = Object.keys(row);
-              for (const name of possibleNames) {
-                const target = normCol(name);
-                const found = rowKeys.find((k) => normCol(k) === target);
-                if (found !== undefined) return row[found];
-              }
-              return undefined;
-            };
-
-            const techColor = {
-              "2G": "#ef4444",
-              "3G": "#eab308",
-              "4G": "#3b82f6",
-              "5G": "#a855f7",
-            };
-            const allSectors = [];
-
-            for (const sheetName of workbook.SheetNames) {
-              const sn = String(sheetName).trim().toUpperCase();
-              const sheetTech = ["2G", "3G", "4G", "5G"].find(
-                (t) => sn === t || sn.includes(t),
+            // BDD-shaped workbook (sheets 2G/3G/4G/5G): reuse the exact same
+            // parser as Update BDD so header aliases, fuzzy fallback and
+            // sector fields (freq/tac/band) stay in sync.
+            if (typeof window.__copMapBddWorkbook !== "function") {
+              throw new Error("Module BDD indisponible (app.js non a jour)");
+            }
+            const { allSectors } = await window.__copMapBddWorkbook(
+              workbook,
+              (info) => {
+                if (info && info.sheet)
+                  fileStatus.textContent =
+                    "BDD: analyse " + info.sheet + "...";
+              },
+              file,
+            );
+            if (_bddSnapshotNeedsRepair(allSectors)) {
+              const fiveSheet = (window.__lastBddImportDiag && window.__lastBddImportDiag.sheets || [])
+                .find((x) => x.tech === "5G");
+              console.error(
+                "[BDD] Import (Sites) produit des secteurs 5G sans NR-ARFCN. En-têtes de la feuille 5G :",
+                fiveSheet ? fiveSheet.header : "(introuvable)",
               );
-              if (!sheetTech) continue;
-
-              const ws = workbook.Sheets[sheetName];
-              const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-
-              for (const row of rows) {
-                let lat,
-                  lng,
-                  azimuth,
-                  name,
-                  cellName,
-                  cellId,
-                  lac,
-                  tac,
-                  freq,
-                  pci,
-                  rnc,
-                  cid;
-
-                lat = parseFloat(getVal(row, ["latitude", "lat"]));
-                lng = parseFloat(
-                  getVal(row, ["longitude", "long", "lon", "lng"]),
-                );
-                azimuth = parseFloat(getVal(row, ["azimut", "azimuth"]));
-
-                if (sheetTech === "2G") {
-                  name = getVal(row, ["site name", "sitename"]);
-                  cellName = getVal(row, ["cellname"]);
-                  lac = getVal(row, ["lac"]);
-                  cellId = getVal(row, ["cellid"]);
-                  freq = parseInt(getVal(row, ["bcch"]));
-                  const ncc = parseInt(getVal(row, ["ncc"]) || 0);
-                  const bcc = parseInt(getVal(row, ["bcc"]) || 0);
-                  pci = !isNaN(ncc) && !isNaN(bcc) ? ncc * 8 + bcc : NaN;
-                  rnc = getVal(row, ["bsc"]);
-                  cid = parseInt(getVal(row, ["cellid"]));
-                } else if (sheetTech === "3G") {
-                  name = getVal(row, ["site name", "sitename"]);
-                  cellName = getVal(row, ["cellname"]);
-                  lac = getVal(row, ["lac"]);
-                  cellId = getVal(row, ["cellid"]);
-                  freq = parseInt(getVal(row, ["downlink uarfcn", "uarfcn"]));
-                  pci = parseInt(getVal(row, ["psc"]));
-                  rnc = parseInt(getVal(row, ["rncid", "rnc"]));
-                  cid = parseInt(getVal(row, ["cellid"]));
-                } else if (sheetTech === "4G") {
-                  name = getVal(row, [
-                    "basestationname",
-                    "site name",
-                    "sitename",
-                    "nodeb name",
-                  ]);
-                  cellName = getVal(row, ["cellname"]);
-                  tac = getVal(row, ["tracking area code", "tac"]);
-                  cellId = getVal(row, ["cell id", "cellid"]);
-                  freq = parseInt(getVal(row, ["downlink earfcn", "earfcn"]));
-                  pci = parseInt(getVal(row, ["physical cell id", "phy cell id", "phycellid", "pci"]));
-                  rnc = parseInt(
-                    getVal(row, [
-                      "enb id",
-                      "enbid",
-                      "enodebid",
-                      "enb_id",
-                      "eNB_ID",
-                    ]),
-                  );
-                  cid = parseInt(getVal(row, ["cell id", "cellid"]));
-                } else if (sheetTech === "5G") {
-                  name = getVal(row, [
-                    "site name",
-                    "sitename",
-                    "gnb name",
-                    "gnbname",
-                    "gnodeb name",
-                    "gnodebname",
-                    "gnodeb function name",
-                    "gnodebfunctionname",
-                    "base station name",
-                  ]);
-                  cellName = getVal(row, [
-                    "cellname",
-                    "nr du cell name",
-                    "nrcellname",
-                    "du cell name",
-                  ]);
-                  tac = getVal(row, ["tracking area code", "tac"]);
-                  cellId = getVal(row, [
-                    "cell id",
-                    "cellid",
-                    "nci",
-                    "nr du cell id",
-                    "du cell id",
-                  ]);
-                  freq = parseInt(
-                    getVal(row, [
-                      "nrarfcn",
-                      "nr arfcn",
-                      "ssb arfcn",
-                      "arfcn",
-                      "downlink nrarfcn",
-                      "uplink nrarfcn",
-                    ]),
-                  );
-                  pci = parseInt(getVal(row, ["pci", "physical cell id", "phy cell id", "phycellid"]));
-                  rnc = parseInt(getVal(row, ["gnb id", "gnbid", "gnodeb id"]));
-                  cid = parseInt(
-                    getVal(row, [
-                      "cell id",
-                      "cellid",
-                      "nci",
-                      "nr du cell id",
-                      "du cell id",
-                    ]),
-                  );
-                }
-
-                if (isNaN(lat) || isNaN(lng)) continue;
-
-                allSectors.push({
-                  ...row,
-                  lat,
-                  lng,
-                  azimuth: isNaN(azimuth) ? 0 : azimuth,
-                  name: name || "",
-                  siteName: name || "",
-                  cellName: cellName || "",
-                  cellId: String(cellId != null ? cellId : ""),
-                  lac: lac != null ? lac : undefined,
-                  tac: tac != null ? tac : undefined,
-                  pci: isNaN(pci) ? undefined : pci,
-                  sc: isNaN(pci) ? undefined : pci,
-                  freq: isNaN(freq) ? undefined : freq,
-                  tech: sheetTech,
-                  color: techColor[sheetTech],
-                  rnc: isNaN(rnc) ? undefined : rnc,
-                  cid: isNaN(cid) ? undefined : cid,
-                });
-              }
+              fileStatus.textContent =
+                "BDD: ⚠ 5G sans NR-ARFCN — en-têtes listés dans la console";
             }
 
             if (allSectors.length > 0) {
@@ -80672,16 +80699,25 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     // derived state never changes the raw DT points.
     if (window.RadioDegradationAnalyzer) {
       loadedLogs.forEach((existingLog) => {
-        if (
-          existingLog.radioDegradationAnalysis?.version ===
-          window.RadioDegradationAnalyzer.VERSION
-        ) return;
+        const needsBackfill = existingLog.radioDegradationAnalysis?.version !==
+          window.RadioDegradationAnalyzer.VERSION;
+        const needsVoiceMerge = !existingLog.radioDegradationAnalysis?.voiceMergeDone &&
+          Array.isArray(existingLog.callSessions) && existingLog.callSessions.length > 0;
+        if (!needsBackfill && !needsVoiceMerge) return;
         try {
-          existingLog.radioDegradationAnalysis =
-            typeof window.RadioDegradationAnalyzer.isSupported === "function" &&
-            window.RadioDegradationAnalyzer.isSupported(existingLog.points)
-              ? window.RadioDegradationAnalyzer.analyze(existingLog.points)
-              : null;
+          if (needsBackfill) {
+            existingLog.radioDegradationAnalysis =
+              typeof window.RadioDegradationAnalyzer.isSupported === "function" &&
+              window.RadioDegradationAnalyzer.isSupported(existingLog.points)
+                ? window.RadioDegradationAnalyzer.analyze(existingLog.points)
+                : null;
+          }
+          // Voice drops / setup failures join the radio review.
+          if (existingLog.radioDegradationAnalysis && typeof window.mergeVoiceIntoRadioAnalysis === "function") {
+            try { window.mergeVoiceIntoRadioAnalysis(existingLog); } catch (mergeErr) {
+              console.warn("[LTE/NR radio analysis] voice merge skipped:", mergeErr);
+            }
+          }
         } catch (error) {
           existingLog.radioDegradationAnalysis = null;
           console.warn("[LTE/NR radio analysis] sidebar backfill skipped:", error);
@@ -80792,7 +80828,11 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             __ph.setAttribute("data-lite-hidden", "1");
             return __ph;
           };
-          if (type === "throughput_degradation" || type === "trp_signaling" || type === "event" || type === "driver_entry") {
+          if (type === "throughput_degradation" || type === "trp_signaling" || type === "driver_entry") {
+            return __liteHidden();
+          }
+          // Call drop / failure markers stay visible in COP LITE (map icons).
+          if (type === "event" && param !== "3g_dropcall" && param !== "3g_call_failure") {
             return __liteHidden();
           }
           if (type === "metric" && typeof window.__copLiteMetricAllowed === "function") {
@@ -83780,28 +83820,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         actions.appendChild(addAction("Time", "time"));
       }
 
-      if (log.voiceAnalysis && log.voiceAnalysis.summary) {
-        const summary = log.voiceAnalysis.summary;
-        const autoIncidentCount = Number(summary.coverageDegradations || 0) +
-          Number(summary.qualityDegradations || 0) +
-          Number(summary.combinedDegradations || 0) +
-          Number(summary.drops || 0) +
-          Number(summary.failures || 0);
-        actions.appendChild(addHeader("VOICE AUTO ANALYSIS"));
-        actions.appendChild(
-          addAction(
-            `Voice candidates to review (${autoIncidentCount})`,
-            "voice_incidents",
-            "voice_incidents",
-          ),
-        );
-      }
-
       if (log.radioDegradationAnalysis && log.radioDegradationAnalysis.summary) {
         const summary = log.radioDegradationAnalysis.summary;
+        // Voice drops / setup failures are merged into the radio review
+        // (no separate voice entry).
         const candidateCount = Number(summary.lteCandidates || 0) + Number(summary.nrCandidates || 0) +
           Number(summary.mosCandidates || 0) + Number(summary.throughputCandidates || 0) +
-          Number(summary.mobilityCandidates || 0);
+          Number(summary.mobilityCandidates || 0) + Number(summary.voiceCandidates || 0);
         actions.appendChild(addHeader("4G/5G + MOS AUTO ANALYSIS"));
         actions.appendChild(
           addAction(
@@ -83823,6 +83848,21 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       }
 
       // Global events entry (kept lightweight): always expose A3/A5 event button when events exist.
+      // COP LITE: call drop / failure markers (map icons with counts).
+      {
+        let callDropCount = 0, callFailCount = 0;
+        try {
+          if (typeof window.filter3gDropCalls === "function") callDropCount = window.filter3gDropCalls(log).length || 0;
+        } catch (e) {}
+        try {
+          if (typeof window.filter3gCallFailure === "function") callFailCount = window.filter3gCallFailure(log).length || 0;
+        } catch (e) {}
+        if (callDropCount > 0 || callFailCount > 0) {
+          actions.appendChild(addHeader("CALL EVENTS"));
+          if (callDropCount > 0) actions.appendChild(addAction(`Call drop (${callDropCount})`, "3g_dropcall", "event"));
+          if (callFailCount > 0) actions.appendChild(addAction(`Call failure (${callFailCount})`, "3g_call_failure", "event"));
+        }
+      }
       // COP LITE: events section hidden (coverage/quality/MOS/throughput + radio/voice review only).
       if (!window.COP_LITE && Array.isArray(log.events) && log.events.length > 0) {
         const a3a5Count =
@@ -85957,6 +85997,34 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     return false;
   }
 
+  // A 5G inventory without NR-ARFCN can never resolve a 5G serving name
+  // (PCI + NR-ARFCN are both mandatory gates), yet browser snapshots created
+  // before the "Downlink NARFCN" column mapping survived, leaving every BDD
+  // Point Details header on the generic "NR Cell (PCI …)" fallback.  Detect
+  // that shape so the startup flow can force a fresh parse of the workbook.
+  function _bddSnapshotNeedsRepair(sectors) {
+    let total = 0;
+    let withoutFreq = 0;
+    for (const s of sectors || []) {
+      if (!s || String(s.tech || "").trim().toUpperCase() !== "5G") continue;
+      total += 1;
+      const f = Number(s.freq ?? s.currentFreq);
+      if (!Number.isFinite(f)) withoutFreq += 1;
+    }
+    return total > 0 && withoutFreq > total * 0.5;
+  }
+
+  async function _peekBddSnapshotSectors() {
+    try {
+      const indexedDbCached = await _loadBddSectorsIndexedDb();
+      if (indexedDbCached) return indexedDbCached;
+    } catch (_) {
+      // Fall through to the legacy localStorage cache.
+    }
+    const cached = _loadBddSectorsCache();
+    return Array.isArray(cached) ? cached : [];
+  }
+
   async function _loadBddOnStartup() {
     let bundle = null;
     try {
@@ -85969,7 +86037,20 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     // SARF stays available via File > Import > Sites.
     let activeBundleVersion = null;
     try { activeBundleVersion = localStorage.getItem(_BDD_BUNDLE_VERSION_KEY); } catch (_) {}
-    if (bundle && bundle.bdd && bundle.version !== activeBundleVersion) {
+    // A saved snapshot written by an older code path may lack the 5G
+    // NR-ARFCN entirely; a matching bundle version would then keep serving
+    // it forever.  Repair by re-parsing the bundled workbook even when the
+    // stored version nominally matches.
+    let snapshotNeedsRepair = false;
+    try {
+      snapshotNeedsRepair = _bddSnapshotNeedsRepair(await _peekBddSnapshotSectors());
+    } catch (_) { snapshotNeedsRepair = false; }
+    if (snapshotNeedsRepair && bundle && bundle.bdd) {
+      console.warn("[BDD] Saved snapshot has no 5G NR-ARFCN frequencies — forcing a fresh parse of", bundle.bdd);
+      const statusEl = document.getElementById("bddStatusText");
+      if (statusEl) statusEl.textContent = "BDD: cache 5G sans fréquences — rechargement en cours...";
+    }
+    if (bundle && bundle.bdd && (bundle.version !== activeBundleVersion || snapshotNeedsRepair)) {
       try {
         const response = await fetch(bundle.bdd, { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -85982,7 +86063,14 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         console.error("[BDD] Bundled inventory unavailable:", error);
       }
     }
-    if (await _applyBddFromLocalCaches()) return;
+    if (await _applyBddFromLocalCaches()) {
+      if (snapshotNeedsRepair) {
+        const statusEl = document.getElementById("bddStatusText");
+        if (statusEl) statusEl.textContent = "BDD: ⚠ 5G sans fréquences (NR-ARFCN) — réimportez le fichier BDD";
+        console.warn("[BDD] Broken 5G snapshot restored from cache; NR cell names cannot resolve until the BDD file is re-imported.");
+      }
+      return;
+    }
     // 3. Durable server snapshot.  Use the API route so this also works through
     // the deployment proxy rather than relying on an ephemeral static file.
     fetch("/api/bdd/sectors", { cache: "no-store" })
@@ -85990,6 +86078,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       .then((payload) => {
         const sectors = Array.isArray(payload) ? payload : payload && payload.sectors;
         if (Array.isArray(sectors) && sectors.length > 0) {
+          if (_bddSnapshotNeedsRepair(sectors)) {
+            console.warn("[BDD] Server snapshot has no 5G NR-ARFCN frequencies; request a fresh BDD import.");
+            return;
+          }
           _applyBddSectorsFromCache(sectors);
           _saveBddSectorsIndexedDb(sectors).catch(() => {});
         }
@@ -86028,7 +86120,15 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     "2G": { name: ["btsname", "site name", "sitename"], cell: ["cellname"], lac: ["lac"], freq: ["bcch"], ncc: ["ncc"], bcc: ["bcc"], rnc: ["bsc"], cid: ["cellid"] },
     "3G": { name: ["nodebname", "site name", "sitename"], cell: ["cellname"], lac: ["lac"], freq: ["downlink uarfcn", "uarfcn"], pci: ["psc"], rnc: ["rncid", "rnc"], cid: ["cellid"] },
     "4G": { name: ["basestationname", "site name", "sitename", "nodeb name"], cell: ["cellname"], tac: ["tracking area code", "tac"], freq: ["downlink earfcn", "earfcn"], pci: ["physical cell id", "phy cell id", "phycellid", "pci"], rnc: ["enb id", "enbid", "enodebid", "enb_id"], cid: ["cell id", "cellid"] },
-    "5G": { name: ["site name", "sitename", "gnb name", "gnbname", "gnodebfunctionname", "gnodebname", "base station name"], cell: ["cellname", "nrducellname", "nr du cell name", "ducellname"], tac: ["tac", "trackingareaid", "tracking area id"], freq: ["downlink narfcn", "narfcn", "arfcn"], pci: ["pci", "physical cell id", "phy cell id", "phycellid"], cid: ["cellid"] },
+    "5G": {
+      name: ["site name", "sitename", "gnb name", "gnbname", "gnodebfunctionname", "gnodebname", "base station name"],
+      cell: ["cellname", "nrducellname", "nr du cell name", "ducellname"],
+      tac: ["tac", "trackingareaid", "tracking area id"],
+      freq: ["downlink narfcn", "narfcn", "nr arfcn", "nrarfcn", "dl narfcn", "downlink nr arfcn", "downlink nrarfcn", "downlink arfcn", "arfcn", "narfcn dl", "arfcn dl", "dl arfcn"],
+      band: ["frequency band", "band", "nr band", "bande de frequence"],
+      pci: ["pci", "physical cell id", "phy cell id", "phycellid"],
+      cid: ["cellid"],
+    },
   };
   const _BDD_TECH_COLOR = { "2G": "#ef4444", "3G": "#eab308", "4G": "#3b82f6", "5G": "#a855f7" };
   const _bddNormCol = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -86117,23 +86217,49 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     });
   }
 
-  function _bddWorkbookToArraysMainThread(arrayBuffer) {
-    if (!window.XLSX) throw new Error("XLSX library unavailable");
+  // Canonical BDD sheet extraction shared by Update BDD (main-thread
+  // fallback) and Import > Sites. Accepts an already-parsed workbook so both
+  // entry points see identical {tech, header, rows} structures.
+  function _bddWorkbookToSheets(wb) {
+    const XLSX = window.XLSX;
+    if (!XLSX) throw new Error("XLSX library unavailable");
     const normSheet = (n) => String(n || "").trim().toUpperCase().replace(/^BDD[\s_-]*/, "");
-    const wb = window.XLSX.read(arrayBuffer, { type: "array" });
     const sheets = [];
+    const matchedTechs = new Set();
     for (const sn of wb.SheetNames) {
       const tech = normSheet(sn);
-      if (!["2G", "3G", "4G", "5G"].includes(tech)) continue;
+      if (!["2G", "3G", "4G", "5G"].includes(tech) || matchedTechs.has(tech)) continue;
       const ws = wb.Sheets[sn];
       if (!ws || !ws["!ref"]) continue;
-      const ref = window.XLSX.utils.decode_range(ws["!ref"]);
+      matchedTechs.add(tech);
+      const ref = XLSX.utils.decode_range(ws["!ref"]);
       if (ref.e.r < 1) continue;
-      const header = (window.XLSX.utils.sheet_to_json(ws, { header: 1, range: { s: { r: 0, c: 0 }, e: { r: 0, c: ref.e.c } }, defval: "" })[0]) || [];
-      const rows = window.XLSX.utils.sheet_to_json(ws, { header: 1, range: { s: { r: 1, c: 0 }, e: { r: ref.e.r, c: ref.e.c } }, defval: "" });
+      const header = (XLSX.utils.sheet_to_json(ws, { header: 1, range: { s: { r: 0, c: 0 }, e: { r: 0, c: ref.e.c } }, defval: "" })[0]) || [];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, range: { s: { r: 1, c: 0 }, e: { r: ref.e.r, c: ref.e.c } }, defval: "" });
+      sheets.push({ tech, header, rows });
+    }
+    // Loose fallback for vendor workbooks whose tabs are not exactly the RAT
+    // name (e.g. "M09 5G"): match by containment, one sheet per RAT.
+    for (const sn of wb.SheetNames) {
+      const txt = String(sn || "").toUpperCase();
+      const tech = ["2G", "3G", "4G", "5G"].find((t) => txt.includes(t));
+      if (!tech || matchedTechs.has(tech)) continue;
+      const ws = wb.Sheets[sn];
+      if (!ws || !ws["!ref"]) continue;
+      matchedTechs.add(tech);
+      const ref = XLSX.utils.decode_range(ws["!ref"]);
+      if (ref.e.r < 1) continue;
+      const header = (XLSX.utils.sheet_to_json(ws, { header: 1, range: { s: { r: 0, c: 0 }, e: { r: 0, c: ref.e.c } }, defval: "" })[0]) || [];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, range: { s: { r: 1, c: 0 }, e: { r: ref.e.r, c: ref.e.c } }, defval: "" });
       sheets.push({ tech, header, rows });
     }
     return sheets;
+  }
+
+  function _bddWorkbookToArraysMainThread(arrayBuffer) {
+    if (!window.XLSX) throw new Error("XLSX library unavailable");
+    const wb = window.XLSX.read(arrayBuffer, { type: "array" });
+    return _bddWorkbookToSheets(wb);
   }
 
   // Chunked row→sector mapping with event-loop yields so the tab stays alive.
@@ -86144,6 +86270,26 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
       const cols = _BDD_COLS[tech];
       if (!cols) continue;
       const map = _bddHeaderIndex(sheet.header);
+      // Vendor exports rename the frequency column ("NR-ARFCN", "NARFCN DL",
+      // "Downlink ARFCN", …) and exact aliases can miss it. Resolve a fuzzy
+      // header index once per sheet so every row still gets its carrier —
+      // a 5G inventory without NR-ARFCN can never resolve a serving name in
+      // Point Details.
+      const fuzzyAt = (pred) => {
+        const header = sheet.header || [];
+        for (let i = 0; i < header.length; i++) {
+          if (pred(String(header[i] || "").toLowerCase())) return i;
+        }
+        return undefined;
+      };
+      const fiveGFreqFuzzyIdx = tech === "5G"
+        ? fuzzyAt((h) => /(?:narfcn|nr\s*[-_ ]?\s*arfcn)/.test(h) && !/uplink/.test(h))
+        : undefined;
+      const fiveGBandFuzzyIdx = tech === "5G"
+        ? fuzzyAt((h) => /(?:frequenc|band\b)/.test(h) && !/bandwidth|bw|width/.test(h))
+        : undefined;
+      const fiveGFreqFuzzy = fiveGFreqFuzzyIdx !== undefined && fiveGFreqFuzzyIdx >= 0;
+      const fiveGBandFuzzy = fiveGBandFuzzyIdx !== undefined && fiveGBandFuzzyIdx >= 0;
       const rows = sheet.rows || [];
       for (let start = 0; start < rows.length; start += _BDD_SHEET_CHUNK_ROWS) {
         const end = Math.min(start + _BDD_SHEET_CHUNK_ROWS, rows.length);
@@ -86154,7 +86300,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
           const lng = parseFloat(_bddPick(row, map, _BDD_COLS.lng));
           if (isNaN(lat) || isNaN(lng)) continue;
           const azimuth = parseFloat(_bddPick(row, map, _BDD_COLS.az)) || 0;
-          let name, cellName, lac, tac, freq, pci, rnc, cid;
+          let name, cellName, lac, tac, freq, pci, rnc, cid, band;
           if (tech === "2G") {
             name = _bddPick(row, map, cols.name);
             cellName = _bddPick(row, map, cols.cell);
@@ -86185,7 +86331,18 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             name = _bddPick(row, map, cols.name);
             cellName = _bddPick(row, map, cols.cell);
             tac = _bddPick(row, map, cols.tac);
-            freq = parseInt(_bddPick(row, map, cols.freq));
+            band = _bddPick(row, map, cols.band);
+            let freqRaw = _bddPick(row, map, cols.freq);
+            if ((freqRaw === undefined || freqRaw === null || String(freqRaw).trim() === "") && fiveGFreqFuzzy) {
+              // Alias miss: vendor renamed the frequency column. The uplink
+              // variant is excluded by the fuzzy predicate, so a wrong
+              // carrier can never be picked this way.
+              freqRaw = row[fiveGFreqFuzzyIdx];
+            }
+            freq = parseInt(freqRaw);
+            if ((band === undefined || band === null || String(band).trim() === "") && fiveGBandFuzzy) {
+              band = row[fiveGBandFuzzyIdx];
+            }
             pci = parseInt(_bddPick(row, map, cols.pci));
             cid = parseInt(_bddPick(row, map, cols.cid));
           }
@@ -86203,6 +86360,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             sc: isNaN(pci) ? undefined : pci,
             freq: isNaN(freq) ? undefined : freq,
             tech,
+            band: tech === "5G" && band != null && String(band).trim() !== "" ? String(band).trim() : undefined,
             color: _BDD_TECH_COLOR[tech],
             rnc: isNaN(rnc) ? undefined : rnc,
             cid: isNaN(cid) ? undefined : cid,
@@ -86254,7 +86412,38 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const allSectors = await _bddSheetsToSectors(sheets, (info) => {
           if (statusEl && info && info.sheet) statusEl.textContent = "BDD: analyse " + info.sheet + " (" + info.done + "/" + info.total + ")...";
         });
+        // Keep the parsed header/summary around for console diagnosis
+        // (window.bddDiag replays it later without reparsing anything).
+        window.__lastBddImportDiag = {
+          at: new Date().toISOString(),
+          file: file && file.name ? String(file.name) : "(blob)",
+          sheets: (sheets || []).map((x) => ({
+            tech: x.tech,
+            header: Array.from(x.header || []).slice(0, 30),
+            rows: x.rows ? x.rows.length : 0,
+          })),
+          sectors: allSectors.length,
+          fiveG: allSectors.reduce((acc, s) => {
+            if (String(s.tech || "").toUpperCase() !== "5G") return acc;
+            acc.total += 1;
+            if (Number.isFinite(Number(s.freq))) acc.withFreq += 1;
+            return acc;
+          }, { total: 0, withFreq: 0 }),
+        };
         if (allSectors.length > 0) {
+          if (_bddSnapshotNeedsRepair(allSectors)) {
+            // The imported workbook has 5G rows but no NARFCN at all: even a
+            // perfect import can never resolve an NR serving name. Surface
+            // the actual 5G headers so the mapping miss is diagnosable.
+            const five = (sheets || []).find((x) => x.tech === "5G");
+            console.error(
+              "[BDD] Import produit des secteurs 5G sans NR-ARFCN. En-têtes de la feuille 5G :",
+              five && five.header ? Array.from(five.header).slice(0, 30) : "(introuvable)",
+            );
+            if (statusEl)
+              statusEl.textContent =
+                "BDD: ⚠ 5G sans NR-ARFCN — colonne fréquence introuvable, en-têtes listés dans la console";
+          }
           _applyBddSectors(allSectors, options);
         } else {
           if (statusEl) statusEl.textContent = "BDD: no valid sectors found";
@@ -86281,6 +86470,84 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
   window.persistBddSnapshot = function () {
     const sectors = _getCurrentBddSectors();
     if (sectors.length) _applyBddSectors(sectors, { append: false });
+  };
+
+  // Incremented whenever the BDD import/matching logic changes: helps to
+  // confirm the browser is running the current file and not a cached copy.
+  window.__COP_BDD_VERSION = "bdd-v8-20261017-freqTacBand";
+
+  // Console diagnostic: layers as seen RIGHT NOW + the last import summary.
+  // Usage: open DevTools console and run  window.bddDiag()
+  window.bddDiag = function () {
+    const out = { version: window.__COP_BDD_VERSION };
+    const mr = window.mapRenderer;
+    const layers = mr && mr.siteLayers instanceof Map ? mr.siteLayers : new Map(Object.entries((mr && mr.siteLayers) || {}));
+    out.layers = [];
+    for (const [id, layer] of layers) {
+      if (!String(id).startsWith(_BDD_LAYER_ID_PREFIX)) continue;
+      const sectors = layer && layer.sectors ? layer.sectors : [];
+      const withFreq = sectors.filter((s) => Number.isFinite(Number(s.currentFreq !== undefined ? s.currentFreq : s.freq))).length;
+      const withTac = sectors.filter((s) => Number.isFinite(Number(s.tac))).length;
+      out.layers.push({ id, count: sectors.length, withFreq, withTac, visible: !!layer.visible });
+      if (id.endsWith("5G") && sectors[0]) {
+        out.sample5G = sectors[0];
+      }
+    }
+    out.lastImport = window.__lastBddImportDiag || null;
+    console.log("[BDD diag]", out);
+    return out;
+  };
+
+  // Canonical BDD workbook mapper shared with Import > Sites: identical
+  // header aliases, fuzzy fallback and sector fields as Update BDD.
+  // Returns { sheets, allSectors } and refreshes window.__lastBddImportDiag.
+  window.__copMapBddWorkbook = async function (workbook, onProgress, fileInfo) {
+    const sheets = _bddWorkbookToSheets(workbook);
+    const allSectors = await _bddSheetsToSectors(sheets, onProgress);
+    window.__lastBddImportDiag = {
+      at: new Date().toISOString(),
+      file: fileInfo && fileInfo.name ? String(fileInfo.name) : "(workbook)",
+      sheets: sheets.map((x) => ({
+        tech: x.tech,
+        header: Array.from(x.header || []).slice(0, 30),
+        rows: x.rows ? x.rows.length : 0,
+      })),
+      sectors: allSectors.length,
+      fiveG: allSectors.reduce((acc, s) => {
+        if (String(s.tech || "").toUpperCase() !== "5G") return acc;
+        acc.total += 1;
+        if (Number.isFinite(Number(s.freq))) acc.withFreq += 1;
+        return acc;
+      }, { total: 0, withFreq: 0 }),
+    };
+    return { sheets, allSectors };
+  };
+
+  // Wipes every persisted BDD copy in this browser (IndexedDB + localStorage).
+  // Layer state on screen is untouched; run it before drinking a fresh import.
+  window.clearBddCache = async function () {
+    try { localStorage.removeItem(_BDD_CACHE_KEY); } catch (_) {}
+    try { localStorage.removeItem(_BDD_BUNDLE_VERSION_KEY); } catch (_) {}
+    await new Promise((resolve) => {
+      const request = window.indexedDB.open(_BDD_IDB_NAME);
+      request.onupgradeneeded = () => resolve();
+      request.onerror = resolve;
+      request.onsuccess = () => {
+        const db = request.result;
+        try {
+          const tx = db.transaction(_BDD_IDB_STORE, "readwrite");
+          tx.objectStore(_BDD_IDB_STORE).delete(_BDD_IDB_KEY);
+          tx.oncomplete = resolve;
+          tx.onerror = resolve;
+          tx.onabort = resolve;
+        } catch (err) { void err; resolve(); }
+        db.close();
+      };
+    });
+    _removeBddDefaultLayers();
+    const statusEl = document.getElementById("bddStatusText");
+    if (statusEl) statusEl.textContent = "BDD: cache navigateur vidé — réimportez votre fichier";
+    console.log("[BDD] caches navigateur vidé (IndexedDB + localStorage)");
   };
 });
 

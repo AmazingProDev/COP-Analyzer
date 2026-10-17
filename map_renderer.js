@@ -993,15 +993,26 @@ class MapRenderer {
         const layers = [];
         if (this.siteLayers && typeof this.siteLayers.forEach === 'function') {
             this.siteLayers.forEach((layer, layerId) => {
-                const isBddLayer = String(layerId || '').startsWith('bdd_default_') || /\bbdd\b/i.test(String(layer?.name || ''));
+                // Substring (not word-boundary) match: imports keep raw file
+                // names such as "BDD_MensuelM9" or "5G BDD Huawei", where
+                // /\bbdd\b/ never matches because of underscores. Candidates
+                // must still pass PCI + frequency + proximity gates below.
+                const isBddLayer = String(layerId || '').startsWith('bdd_default_') || /bdd/i.test(String(layer?.name || ''));
                 const identity = `${layerId || ''} ${layer?.name || ''}`.toUpperCase();
                 const isNrLayer = /(?:5G|\bNR\b)/.test(identity);
                 const isLteLayer = /(?:4G|\bLTE\b|E-UTRA)/.test(identity);
+                // 2G/3G layers must never feed an LTE/NR PCI index: a UMTS
+                // PSC and a PCI share the 0-503 number space, so a same-PCI
+                // match against UMTS carriers pollutes the index with
+                // UARFCN-valued "frequencies" and produces bogus gap
+                // diagnostics (e.g. "Δf 625930") when resolving NR cells.
+                const is2gLayer = /(?:2G|\bGSM\b|BCCH)/.test(identity);
+                const is3gLayer = /(?:3G|\bUMTS\b|UARFCN)/.test(identity);
                 // A generic BDD name has no RAT hint, so retain it as a safe
                 // fallback. Named BDD 5G Huawei is indexed only for NR.
                 const fitsRat = !wantedRat ||
-                    (wantedRat === 'NR' && (!isLteLayer || isNrLayer)) ||
-                    (wantedRat === 'LTE' && (!isNrLayer || isLteLayer));
+                    (wantedRat === 'NR' && !is2gLayer && !is3gLayer && (!isLteLayer || isNrLayer)) ||
+                    (wantedRat === 'LTE' && !is2gLayer && !is3gLayer && (!isNrLayer || isLteLayer));
                 if (isBddLayer && fitsRat && Array.isArray(layer?.sectors)) {
                     layers.push({ id: String(layerId || ''), sectors: layer.sectors });
                 }
@@ -1039,6 +1050,71 @@ class MapRenderer {
         };
         this._technicalBddIndexes.set(wantedRat, index);
         return index;
+    }
+
+    // Diagnostic aid for unresolved NR serving cells in Point Details:
+    // explains WHY no BDD name matched (no same-PCI sector at all, carrier
+    // too far off, or nearest candidate beyond tolerance).
+    describeNrServingGap(pci, freq, lat, lng) {
+        try {
+            const toNum = (v) => {
+                if (v === undefined || v === null || String(v).trim() === '') return null;
+                const n = Number(v);
+                return Number.isFinite(n) ? n : null;
+            };
+            const seen = new Set();
+            const all = [];
+            // Diagnostic must mirror the actual NR matcher: only NR-rating
+            // sectors (tech/band 5G/NR/Nxx, or an explicit NR-ARFCN key) are
+            // eligible. Counting UMTS PSCs that reuse the PCI number space
+            // produced misleading "Δf 625930" messages.
+            const sectorIsNrCandidate = (s) => {
+                if (!s || typeof s !== 'object') return false;
+                const tech = String(s.tech || '').toUpperCase();
+                const band = String(s.band || '').toUpperCase();
+                if (tech.includes('NR') || tech.includes('5G') || /^N\d+/.test(band)) return true;
+                if (tech && !/L[0-9]|LTE|UTRA|GSM/.test(tech)) return false;
+                const hasNrArfcnKey = Object.keys(s).some((key) =>
+                    /(?:nr.*arfcn|arfcn.*nr|central.*dl.*arfcn|ssb.*arfcn)/i.test(String(key || '').trim()));
+                if (hasNrArfcnKey) return true;
+                return false;
+            };
+            const techIdx = (typeof this._getTechnicalBddIndex === 'function')
+                ? this._getTechnicalBddIndex('NR') : null;
+            const fromTech = (techIdx && techIdx.byPci && techIdx.byPci.get(String(pci))) || [];
+            fromTech.forEach((s) => { if (s && sectorIsNrCandidate(s) && !seen.has(s)) { seen.add(s); all.push(s); } });
+            const vis = this.siteIndex && this.siteIndex.bySc && this.siteIndex.bySc.get(String(pci));
+            if (Array.isArray(vis)) vis.forEach((s) => { if (s && sectorIsNrCandidate(s) && !seen.has(s)) { seen.add(s); all.push(s); } });
+            const sectors5g = all.length;
+            const f = toNum(freq);
+            const plat = toNum(lat), plng = toNum(lng);
+            const haversineM = (a, b, c, d) => {
+                const helper = window.siteMatchUtils;
+                if (helper && typeof helper.haversineMeters === 'function') {
+                    const dist = helper.haversineMeters(a, b, c, d);
+                    if (Number.isFinite(dist)) return dist;
+                }
+                const x = (c - a) * 111320;
+                const y = (d - b) * 111320 * Math.cos((a + c) / 2 * Math.PI / 180);
+                return Math.hypot(x, y);
+            };
+            let freqOk = 0, nearestM = null, minDelta = null;
+            all.forEach((s) => {
+                const sf = toNum(s.currentFreq !== undefined ? s.currentFreq : s.freq);
+                if (f === null || sf === null) return;
+                const delta = Math.abs(sf - f);
+                if (minDelta === null || delta < minDelta) minDelta = delta;
+                if (delta > 5000) return;
+                freqOk += 1;
+                const slat = toNum(s.lat), slng = toNum(s.lng !== undefined ? s.lng : s.lon);
+                if (plat === null || plng === null || slat === null || slng === null) return;
+                const dist = haversineM(plat, plng, slat, slng);
+                if (Number.isFinite(dist) && (nearestM === null || dist < nearestM)) nearestM = dist;
+            });
+            return { sectors5g, samePci: all.length, freqOk, nearestM, minDelta };
+        } catch (e) {
+            return null;
+        }
     }
 
     getServingCell(p) {
@@ -1249,6 +1325,11 @@ class MapRenderer {
         // The relaxed rule is intentionally NR-only and still requires the
         // same PCI *and* a geographically plausible BDD sector. This keeps
         // the protection against LTE/NR PCI reuse and remote PCI collisions.
+        // Proximity radius follows the band: low/mid FDD cells (n1/n3/n5/n8/
+        // n20/n28) cover far more than TDD n78. 8 km unifies both after
+        // drive routes showed legitimate n78 servings 5–7 km out (the PCI +
+        // ΔARFCN ≤ 5000 gates still guard against PCI reuse).
+        const nrProximityRadiusM = (site) => 8000;
         const isNearbyNrCandidate = (site) => {
             if (!requiresNr || measuredPci === null || !site) return false;
             const sitePci = sitePciValue(site);
@@ -1258,15 +1339,15 @@ class MapRenderer {
             const slat = parseFiniteNumber(site.lat);
             const slng = parseFiniteNumber(site.lng !== undefined ? site.lng : site.lon);
             if (plat === null || plng === null || slat === null || slng === null) return false;
+            const radiusM = nrProximityRadiusM(site);
             const helper = window.siteMatchUtils;
             if (helper && typeof helper.haversineMeters === 'function') {
                 const distance = helper.haversineMeters(plat, plng, slat, slng);
-                // n78 is the tightest configured NR serving-match radius.
-                return Number.isFinite(distance) && distance <= 2500;
+                return Number.isFinite(distance) && distance <= radiusM;
             }
             const latScale = 111320;
             const lngScale = latScale * Math.cos(((plat + slat) / 2) * Math.PI / 180);
-            return Math.hypot((plat - slat) * latScale, (plng - slng) * lngScale) <= 2500;
+            return Math.hypot((plat - slat) * latScale, (plng - slng) * lngScale) <= radiusM;
         };
         const isNrFrequencyCompatible = (site, siteFreq) => {
             if (measuredFreq === null || siteFreq === null) return false;
